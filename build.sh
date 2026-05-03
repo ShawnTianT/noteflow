@@ -1,10 +1,25 @@
 #!/bin/bash
 # Noteflow 发布脚本
-# 将源文件复制到 dist/ 目录，供 HTTP 服务器提供页面
-# 使用方法：bash build.sh
+# 将源文件复制到 dist/ + docs/，可选推送到 GitHub
+# 使用方法：
+#   bash build.sh          → 只更新 dist/ + docs/
+#   bash build.sh push     → 更新 + 自动 git push
+#   bash build.sh push "修复标签bug"  → 更新 + push 并指定提交信息
 
 DIST_DIR="dist"
+DOCS_DIR="docs"
 SRC_DIR="."
+
+# 读取参数
+PUSH_MODE=false
+COMMIT_MSG=""
+
+for arg in "$@"; do
+  case $arg in
+    push) PUSH_MODE=true ;;
+    *) COMMIT_MSG="$arg" ;;
+  esac
+done
 
 echo "📦 正在发布 Noteflow..."
 
@@ -12,19 +27,46 @@ echo "📦 正在发布 Noteflow..."
 VERSION=$(cat VERSION 2>/dev/null | tr -d '\n' || echo "unknown")
 echo "   版本: $VERSION"
 
-# 清空 dist（保留 images 目录）
-rm -rf "$DIST_DIR/css" "$DIST_DIR/js" "$DIST_DIR/libs" "$DIST_DIR/utils" "$DIST_DIR/data" "$DIST_DIR/index.html" "$DIST_DIR/VERSION" 2>/dev/null
+# 同步函数：将源文件复制到目标目录
+sync_to_dir() {
+  local TARGET="$1"
+  rm -rf "$TARGET/css" "$TARGET/js" "$TARGET/libs" "$TARGET/utils" "$TARGET/data" "$TARGET/index.html" "$TARGET/VERSION" 2>/dev/null
+  cp -r "$SRC_DIR/css" "$TARGET/"
+  cp -r "$SRC_DIR/js" "$TARGET/"
+  cp -r "$SRC_DIR/data" "$TARGET/"
+  cp -r "$SRC_DIR/libs" "$TARGET/" 2>/dev/null
+  cp -r "$SRC_DIR/utils" "$TARGET/" 2>/dev/null
+  cp "$SRC_DIR/index.html" "$TARGET/"
+  cp "$SRC_DIR/VERSION" "$TARGET/"
+  mkdir -p "$TARGET/data/images"
+}
 
-# 复制所有文件到 dist
-cp -r "$SRC_DIR/css" "$DIST_DIR/"
-cp -r "$SRC_DIR/js" "$DIST_DIR/"
-cp -r "$SRC_DIR/data" "$DIST_DIR/"
-cp -r "$SRC_DIR/libs" "$DIST_DIR/" 2>/dev/null
-cp -r "$SRC_DIR/utils" "$DIST_DIR/" 2>/dev/null
-cp "$SRC_DIR/index.html" "$DIST_DIR/"
-cp "$SRC_DIR/VERSION" "$DIST_DIR/"
+# 1. 同步到 dist/（本地服务器用）
+sync_to_dir "$DIST_DIR"
+echo "   ✅ dist/ 已更新"
 
-# 确保图片目录存在
-mkdir -p "$DIST_DIR/data/images"
+# 2. 同步到 docs/（GitHub Pages 用）
+sync_to_dir "$DOCS_DIR"
+echo "   ✅ docs/ 已更新"
 
-echo "✅ 发布完成！版本 $VERSION 已部署到 dist/"
+echo "✅ 发布完成！版本 $VERSION"
+
+# 3. 如果带 push 参数，自动提交并推送到 GitHub
+if [ "$PUSH_MODE" = true ]; then
+  echo ""
+  echo "🚀 正在推送到 GitHub..."
+
+  cd "$(dirname "$0")"
+
+  # 默认提交信息
+  if [ -z "$COMMIT_MSG" ]; then
+    COMMIT_MSG="v$VERSION"
+  fi
+
+  git add "$DIST_DIR/" "$DOCS_DIR/" index.html css/ js/ utils/ VERSION AGENTS.md
+  git commit -m "$COMMIT_MSG"
+  git push origin main
+
+  echo "✅ 已推送到 GitHub！线上版本将自动更新"
+  echo "   🌐 https://shawntiant.github.io/noteflow/"
+fi
