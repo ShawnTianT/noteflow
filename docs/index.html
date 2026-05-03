@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+  <script>
+    // 手机端自动跳转到 /mobile/
+    (function() {
+      var ua = navigator.userAgent || navigator.vendor || window.opera;
+      var isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      var path = window.location.pathname;
+      if (isMobile && !path.includes('/mobile/')) {
+        if (!path.endsWith('/')) path += '/';
+        window.location.pathname = path + 'mobile/';
+      }
+    })();
+  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Noteflow - 笔记库</title>
