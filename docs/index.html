@@ -2,12 +2,13 @@
 <html lang="zh-CN">
 <head>
   <script>
-    // 手机端自动跳转到 /mobile/
+    // 手机端（窄屏）自动跳转到 /mobile/，横屏/宽屏仍用 PC 版
     (function() {
       var ua = navigator.userAgent || navigator.vendor || window.opera;
-      var isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      var isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      var isNarrow = screen.width < 768;  // 窄屏才用手机版
       var path = window.location.pathname;
-      if (isMobile && !path.includes('/mobile/')) {
+      if (isMobileUA && isNarrow && !path.includes('/mobile/')) {
         if (!path.endsWith('/')) path += '/';
         window.location.pathname = path + 'mobile/';
       }
