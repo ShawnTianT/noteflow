@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Noteflow - 笔记库</title>
   <link rel="stylesheet" href="css/style.css">
-  <!-- 窄屏（<768px）自动跳转到 /mobile/，必须放在 viewport 标签之后 -->
+  <!-- 窄屏（<768px）自动跳转到 /mobile/，放在 viewport 后，延迟到 viewport 生效再判断 -->
   <script>
-    (function() {
+    setTimeout(function() {
       if (window.innerWidth < 768 && !window.location.pathname.includes('/mobile/')) {
         var path = window.location.pathname;
         if (!path.endsWith('/')) path += '/';
         window.location.pathname = path + 'mobile/';
       }
-    })();
+    }, 0);
   </script>
 </head>
 <body>

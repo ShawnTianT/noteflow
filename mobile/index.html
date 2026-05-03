@@ -8,16 +8,15 @@
   <meta name="theme-color" content="#ffffff">
   <title>Noteflow</title>
   <link rel="stylesheet" href="css/mobile.css">
-  <!-- 宽屏（横屏/平板）自动跳回 PC 版，必须放在 viewport 标签之后 -->
+  <!-- 宽屏（横屏/平板）自动跳回 PC 版，延迟到 viewport 生效再判断 -->
   <script>
-    (function() {
-      // window.innerWidth 必须在 viewport 标签解析后才能正确获取
+    setTimeout(function() {
       if (window.innerWidth >= 768) {
         var path = window.location.pathname;
         var base = path.replace(/\/mobile\/?$/, '/').replace(/\/mobile\//, '/');
         window.location.pathname = base;
       }
-    })();
+    }, 0);
   </script>
 </head>
 </head>
