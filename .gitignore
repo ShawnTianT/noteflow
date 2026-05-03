@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+package-lock.json
+package.json
+sqlpub-proxy-package.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+env/
+venv/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# 临时文件
+*.log
+*.tmp
+.env
+
+# 项目特定
+com.noteflow.server.plist
+start-server.sh
+sqlpub-proxy-server.js
+SQLPUB_PROXY_README.md
