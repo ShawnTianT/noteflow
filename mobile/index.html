@@ -1,16 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <script>
-    // 宽屏（横屏/平板）自动跳回 PC 版
-    (function() {
-      if (window.innerWidth >= 768) {
-        var path = window.location.pathname;
-        var base = path.replace(/\/mobile\/?$/, '/').replace(/\/mobile\//, '/');
-        window.location.pathname = base;
-      }
-    })();
-  </script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,6 +8,18 @@
   <meta name="theme-color" content="#ffffff">
   <title>Noteflow</title>
   <link rel="stylesheet" href="css/mobile.css">
+  <!-- 宽屏（横屏/平板）自动跳回 PC 版，必须放在 viewport 标签之后 -->
+  <script>
+    (function() {
+      // window.innerWidth 必须在 viewport 标签解析后才能正确获取
+      if (window.innerWidth >= 768) {
+        var path = window.location.pathname;
+        var base = path.replace(/\/mobile\/?$/, '/').replace(/\/mobile\//, '/');
+        window.location.pathname = base;
+      }
+    })();
+  </script>
+</head>
 </head>
 <body>
 
