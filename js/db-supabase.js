@@ -107,6 +107,53 @@ const DB = (() => {
   }
 
   // ================================================
+  // 数据格式归一化工具
+  // ================================================
+
+  /**
+   * 从笔记内容中提取标签（后备方案，当 tags 字段为空时）
+   */
+  function extractTagsFromContent(content) {
+    if (!content) return [];
+    const regex = /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g;
+    const matches = [];
+    let m;
+    while ((m = regex.exec(content)) !== null) {
+      matches.push(m[1]);
+    }
+    return matches;
+  }
+
+  function normalizeTags(tags) {
+    if (Array.isArray(tags)) return tags;
+    if (typeof tags === 'string') {
+      if (tags.trim() === '') return [];
+      try {
+        const parsed = JSON.parse(tags);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+      return tags.split(',').map(t => t.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  /**
+   * 将字段归一化为数组（image_paths, image_data）
+   */
+  function normalizeToArray(val) {
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') {
+      if (val.trim() === '') return [];
+      try {
+        const parsed = JSON.parse(val);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+      return val.split(',').map(t => t.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  // ================================================
   // 初始化
   // ================================================
   async function init() {
@@ -247,9 +294,9 @@ const DB = (() => {
       for (const note of allNotes) {
         const normalized = {
           ...note,
-          tags: Array.isArray(note.tags) ? note.tags : (note.tags ? JSON.parse(note.tags) : []),
-          image_paths: Array.isArray(note.image_paths) ? note.image_paths : (note.image_paths ? JSON.parse(note.image_paths) : []),
-          image_data: Array.isArray(note.image_data) ? note.image_data : (note.image_data ? JSON.parse(note.image_data) : []),
+          tags: normalizeTags(note.tags),
+          image_paths: normalizeToArray(note.image_paths),
+          image_data: normalizeToArray(note.image_data),
           is_done: note.is_done === true || note.is_done === 1,
         };
         await idbPut('notes', normalized);
@@ -391,9 +438,13 @@ const DB = (() => {
 
     if (tag) {
       notes = notes.filter(n => {
-        if (!n.tags) return false;
-        const tags = Array.isArray(n.tags) ? n.tags : [];
-        return tags.some(t => t === tag || t.startsWith(tag + '/'));
+        // 先尝试从 tags 字段获取
+        let tagList = normalizeTags(n.tags);
+        // 如果 tags 为空，从 content 提取
+        if (tagList.length === 0 && n.content) {
+          tagList = extractTagsFromContent(n.content);
+        }
+        return tagList.some(t => t === tag || t.startsWith(tag + '/'));
       });
     }
 
@@ -612,7 +663,7 @@ const DB = (() => {
     const tagCountMap = {};
 
     for (const note of notes) {
-      const tags = Array.isArray(note.tags) ? note.tags : [];
+      const tags = normalizeTags(note.tags);
       for (const tag of tags) {
         tagCountMap[tag] = (tagCountMap[tag] || 0) + 1;
       }
