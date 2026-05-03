@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Noteflow - 笔记库</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- 全局错误捕获 -->
+<script>
+window.onerror = function(msg, url, line, col, err) {
+  document.body.innerHTML = '<div style="padding:40px;font-family:monospace;white-space:pre-wrap;color:#c00;background:#fff5f5;min-height:100vh"><h2>页面加载出错</h2><p>' + msg + '</p><p style="color:#666">' + url + ':' + line + ':' + col + '</p></div>';
+};
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('Unhandled rejection:', e.reason);
+});
+</script>
+
+<div id="app">
+  <!-- 加载状态 -->
+  <div v-if="!loaded" class="loading" style="height:100vh;display:flex;align-items:center;justify-content:center;">
+    <div>
+      <div class="loading-spinner"></div>
+      <p style="margin-top:12px;color:var(--text-secondary)">正在初始化...</p>
+    </div>
+  </div>
+
+  <!-- ===== 登录界面（未登录时显示） ===== -->
+  <div v-else-if="!isLoggedIn && !localMode" class="login-page">
+    <div class="login-card">
+      <h1 class="login-logo">Noteflow</h1>
+      <p class="login-subtitle">记录想法，随时随地</p>
+      <div class="login-form">
+        <input type="text" v-model="loginUsername" class="modal-input" placeholder="账号" @keyup.enter="doSignIn">
+        <input type="password" v-model="loginPassword" class="modal-input" placeholder="密码" @keyup.enter="doSignIn">
+        <div v-if="loginError" class="login-error">{{ loginError }}</div>
+        <button class="btn btn-primary" style="width:100%" @click="doSignIn" :disabled="loginLoading">
+          {{ loginLoading ? '登录中...' : '登录' }}
+        </button>
+        <div class="login-links">
+          <a href="#" @click.prevent="enterLocalMode">暂不登录（本地模式）</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 主布局（已登录或本地模式） ===== -->
+  <div v-else class="app-layout" @click="closeExportMenu">
+
+    <!-- ===== 侧边栏 ===== -->
+    <aside class="sidebar">
+      <!-- Logo + 统计 + 同步状态 -->
+      <div class="sidebar-header">
+        <span class="sidebar-logo">Noteflow</span>
+        <span class="sidebar-stats">{{ noteCount }} 条笔记</span>
+      </div>
+      <div v-if="isLoggedIn" class="sync-status" :class="syncStatusClass" @click="manualSync">
+        {{ syncStatusText }}
+      </div>
+
+      <!-- 搜索框 -->
+      <div class="search-area">
+        <div class="search-box">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+          </svg>
+          <input type="text" id="search-input" placeholder="搜索笔记..." autocomplete="off">
+        </div>
+        <button class="btn btn-sm btn-text daily-review-btn" @click="dailyReview">
+          📖 每日回顾
+        </button>
+      </div>
+
+      <!-- 标签列表 -->
+      <div class="tags-area">
+        <div class="tags-area-title">标签</div>
+        <div id="tags-list"></div>
+      </div>
+
+      <!-- 底部操作 -->
+      <div class="sidebar-footer">
+        <button class="btn btn-sm btn-default" @click="importFlomo">导入</button>
+        <div class="export-menu-wrapper" style="position:relative;flex:1;">
+          <button class="btn btn-sm btn-default" style="width:100%" @click.stop="toggleExportMenu">导出 ▾</button>
+          <div v-if="showExportMenu" class="user-dropdown show" style="left:0;right:auto;bottom:100%;top:auto;margin-bottom:4px;min-width:140px;">
+            <div class="user-option" @click="exportJSON">
+              <span>📋 JSON 文件</span>
+            </div>
+            <div class="user-option" @click="exportFlomo">
+              <span>🗂 flomo 格式</span>
+            </div>
+          </div>
+        </div>
+        <button v-if="isLoggedIn" class="btn btn-sm btn-default" @click="doSignOut" title="退出登录">退出登录</button>
+      </div>
+    </aside>
+
+    <!-- ===== 主区域 ===== -->
+    <main class="main-area">
+      <!-- 顶栏 -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <span class="topbar-title" v-if="currentTag">#{{ currentTag }}</span>
+          <span class="topbar-title" v-else>全部笔记</span>
+          <span v-if="localMode" class="local-mode-badge">本地模式</span>
+        </div>
+        <div class="topbar-right">
+          <span v-if="isLoggedIn" class="user-email">{{ userUsername }}</span>
+          <button v-if="isLoggedIn" class="btn btn-sm btn-default" @click="doSignOut" style="margin-left:8px">退出登录</button>
+        </div>
+      </header>
+
+      <!-- 编辑器 -->
+      <div class="editor-area" id="editor-area">
+        <div class="editor-wrapper">
+          <textarea id="note-input" placeholder="记录想法... Enter 发送，Shift+Enter 换行"></textarea>
+          <div id="image-preview"></div>
+          <div class="editor-toolbar">
+            <div class="tag-preview" id="tag-preview"></div>
+            <div class="editor-actions">
+              <button class="btn btn-sm btn-default" id="image-upload-btn" title="上传图片">
+                📷 图片
+              </button>
+              <button class="btn btn-sm btn-primary" onclick="Editor.sendNote(app)">发送</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 时间线 -->
+      <div class="content-area">
+        <div id="notes-container" class="notes-container"></div>
+        <div v-if="loadingMore" class="loading-more">
+          <div class="loading-spinner" style="width:20px;height:20px;border-width:2px;"></div>
+          <span>加载更多...</span>
+        </div>
+        <div v-if="!hasMoreNotes && notesLoaded" class="no-more">已加载全部笔记</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===== 编辑模态框 ===== -->
+  <div class="modal-overlay" id="edit-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title">编辑笔记</span>
+        <button class="modal-close" onclick="Timeline.closeEditModal()">×</button>
+      </div>
+      <textarea id="edit-content"></textarea>
+      <div class="modal-footer">
+        <button class="btn btn-default" onclick="Timeline.closeEditModal()">取消</button>
+        <button class="btn btn-primary" onclick="Timeline.saveEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CDN 依赖 ===== -->
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+<!-- ===== 应用模块（按依赖顺序） ===== -->
+<script src="js/utils/imageHelper.js"></script>
+<script src="js/utils/zipHelper.js"></script>
+<script src="js/utils/flomoImport.js"></script>
+<script src="js/db-supabase.js"></script>
+<script src="js/modules/editor.js"></script>
+<script src="js/modules/timeline.js"></script>
+<script src="js/modules/tags.js"></script>
+<script src="js/modules/search.js"></script>
+<script src="js/modules/user.js"></script>
+<script src="js/modules/export.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
