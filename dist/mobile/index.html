@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#ffffff">
+  <title>Noteflow</title>
+  <link rel="stylesheet" href="css/mobile.css">
+</head>
+<body>
+
+<script>
+window.onerror = function(msg, url, line, col, err) {
+  document.body.innerHTML = '<div style="padding:40px;font-family:monospace;white-space:pre-wrap;color:#c00;background:#fff5f5;min-height:100vh"><h2>页面加载出错</h2><p>' + msg + '</p><p style="color:#666">'+url+':'+line+':'+col+'</p></div>';
+};
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('Unhandled rejection:', e.reason);
+});
+</script>
+
+<div id="app">
+  <!-- ===== 加载状态 ===== -->
+  <div v-if="!loaded" class="loading-screen">
+    <div class="loading-spinner"></div>
+    <p>正在初始化...</p>
+  </div>
+
+  <!-- ===== 登录页面 ===== -->
+  <div v-else-if="!isLoggedIn && !localMode" class="login-page">
+    <div class="login-card">
+      <h1 class="login-logo">Noteflow</h1>
+      <p class="login-subtitle">记录想法，随时随地</p>
+      <div class="login-form">
+        <input type="text" v-model="loginUsername" class="login-input" placeholder="账号" @keyup.enter="doSignIn" autocomplete="username">
+        <input type="password" v-model="loginPassword" class="login-input" placeholder="密码" @keyup.enter="doSignIn" autocomplete="current-password">
+        <div v-if="loginError" class="login-error">{{ loginError }}</div>
+        <button class="login-btn" @click="doSignIn" :disabled="loginLoading">
+          {{ loginLoading ? '登录中...' : '登录' }}
+        </button>
+        <div class="login-links">
+          <a href="#" @click.prevent="enterLocalMode">暂不登录（本地模式）</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 主界面 ===== -->
+  <div v-else class="mobile-app">
+
+    <!-- ===== 标签抽屉 ===== -->
+    <div class="tag-drawer" :class="{ active: tagDrawerOpen }">
+      <div class="drawer-backdrop" @click="closeTagDrawer"></div>
+      <div class="drawer-panel">
+        <div class="drawer-header">
+          <span class="drawer-title">标签筛选</span>
+          <button class="drawer-close" @click="closeTagDrawer">×</button>
+        </div>
+        <div class="drawer-content">
+          <div class="drawer-search">
+            <input type="text" v-model="tagSearchKey" placeholder="搜索标签..." class="tag-search-input">
+          </div>
+          <div class="drawer-tags">
+            <button class="drawer-tag" :class="{ active: !currentTag }" @click="filterByTag(''); closeTagDrawer();">
+              <span>全部</span>
+              <span class="tag-count">{{ noteCount }}</span>
+            </button>
+            <template v-for="(group, parent) in filteredGroupedTags" :key="parent">
+              <!-- 一级标签 -->
+              <button class="drawer-tag parent" :class="{ active: currentTag === parent }" @click="filterByTag(parent); closeTagDrawer();">
+                <span class="tag-name">
+                  <svg v-if="group.children.length" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="expand-icon" :class="{ expanded: expandedTags.has(parent) }" @click.stop="toggleExpand(parent)">
+                    <path d="M9 18l6-6-6-6"/>
+                  </svg>
+                  #{{ parent }}
+                </span>
+                <span class="tag-count">{{ group.total }}</span>
+              </button>
+              <!-- 二级标签（展开时显示） -->
+              <template v-if="group.children.length && expandedTags.has(parent)">
+                <button v-for="child in group.children" :key="parent + '/' + child.name"
+                  class="drawer-tag child"
+                  :class="{ active: currentTag === parent + '/' + child.name }"
+                  @click="filterByTag(parent + '/' + child.name); closeTagDrawer();">
+                  <span class="tag-name">
+                    <span class="child-prefix"></span>
+                    #{{ child.name }}
+                  </span>
+                  <span class="tag-count">{{ child.count }}</span>
+                </button>
+              </template>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 顶部区域 ===== -->
+    <header class="mobile-header">
+      <div class="header-top">
+        <div class="header-left">
+          <button class="menu-btn" @click="toggleTagDrawer" title="标签">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 6h16M4 12h16M4 18h16"/>
+            </svg>
+            <span v-if="currentTag" class="current-tag-dot"></span>
+          </button>
+        </div>
+        <div class="app-logo">Noteflow</div>
+        <div class="header-actions">
+          <button class="header-btn" @click="dailyReview" title="每日回顾">📖</button>
+          <span v-if="isLoggedIn && syncStatus === 'syncing'" class="sync-badge syncing" @click="manualSync">🔄</span>
+          <span v-else-if="isLoggedIn && syncStatus === 'synced'" class="sync-badge online" @click="manualSync">☁️</span>
+          <span v-else-if="isLoggedIn" class="sync-badge offline" @click="manualSync">📴</span>
+          <span v-if="localMode" class="sync-badge local-badge">📱</span>
+          <button class="header-btn" @click="showMoreMenu" title="更多">⋯</button>
+        </div>
+      </div>
+
+      <!-- 搜索框 -->
+      <div class="search-bar">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+        <input type="text" v-model="searchKey" @input="onSearchInput" @keydown.escape="clearSearch" placeholder="搜索笔记..." class="search-input">
+        <button v-if="searchKey" class="search-clear" @click="clearSearch">×</button>
+      </div>
+
+      <!-- 当前标签指示器 -->
+      <div class="current-tag-bar" v-if="currentTag" @click="filterByTag('')">
+        <span class="tag-label">#{{ currentTag }}</span>
+        <span class="clear-tag">×</span>
+      </div>
+    </header>
+
+    <!-- ===== 中间可滚动区域 ===== -->
+    <main class="notes-scroll" ref="notesScroll" @scroll="onScroll">
+      <div class="notes-list">
+        <template v-for="(note, idx) in notes" :key="note.id">
+          <!-- 日期分割线 -->
+          <div class="date-divider" v-if="isFirstNoteOfDate(idx)">
+            {{ formatDateLabel(note.created_at) }}
+          </div>
+
+          <!-- 笔记卡片 -->
+          <div class="note-card" :data-id="note.id" @click="onCardClick(note)" @contextmenu.prevent="showCardMenu(note)">
+            <!-- 内容 -->
+            <div class="card-content" v-html="highlightTags(escapeHtml(note.content || ''))"></div>
+
+            <!-- 图片 -->
+            <div class="card-images" v-if="getImageUrls(note).length > 0">
+              <div v-for="(img, imgIdx) in getImageUrls(note)" :key="imgIdx" class="card-image-thumb" @click.stop="zoomImage(img.src)">
+                <img :src="img.src" alt="图片" loading="lazy">
+              </div>
+            </div>
+
+            <!-- 底部时间 + 操作 -->
+            <div class="card-footer">
+              <span class="card-time">{{ formatTime(note.created_at) }}</span>
+              <div class="card-actions">
+                <button class="btn-icon" @click.stop="copyNote(note)" title="复制">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                  </svg>
+                </button>
+                <button class="btn-icon" @click.stop="startEdit(note)" title="编辑">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                  </svg>
+                </button>
+                <button class="btn-icon btn-danger" @click.stop="confirmDelete(note)" title="删除">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- 空状态 -->
+        <div v-if="notesLoaded && notes.length === 0" class="empty-state">
+          <div class="empty-icon">📝</div>
+          <p>{{ currentTag || searchKey ? '没有找到匹配的笔记' : '还没有笔记，开始记录吧' }}</p>
+        </div>
+
+        <!-- 加载更多 -->
+        <div v-if="loadingMore" class="loading-more">
+          <div class="loading-spinner small"></div>
+          <span>加载中...</span>
+        </div>
+        <div v-if="!hasMore && notes.length > 0" class="no-more">已加载全部 · {{ noteCount }} 条</div>
+      </div>
+    </main>
+
+    <!-- ===== FAB 悬浮发布按钮 ===== -->
+    <button class="fab" @click="openPublishModal" title="发布">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+    </button>
+
+    <!-- ===== 发布弹窗 ===== -->
+    <div class="publish-modal" :class="{ active: publishModalOpen }" @click.self="closePublishModal">
+      <div class="publish-panel">
+        <div class="publish-header">
+          <span class="publish-title">发布笔记</span>
+          <button class="publish-close" @click="closePublishModal">×</button>
+        </div>
+        <div class="publish-content">
+          <textarea class="publish-textarea" v-model="publishInput" @input="updatePublishTags" placeholder="记录你的想法..." rows="6" ref="publishInput"></textarea>
+          <!-- 标签预览 -->
+          <div class="publish-tags" v-if="publishTags.length > 0">
+            <span v-for="tag in publishTags" :key="tag" class="publish-tag">#{{ tag }}</span>
+          </div>
+          <!-- 图片预览 -->
+          <div class="publish-images" v-if="publishImages.length > 0">
+            <div v-for="(img, idx) in publishImages" :key="idx" class="publish-image">
+              <img :src="img.dataUrl" alt="预览">
+              <button class="remove-publish-img" @click="publishImages.splice(idx, 1)">×</button>
+            </div>
+          </div>
+        </div>
+        <div class="publish-footer">
+          <button class="publish-add-img" @click="triggerPublishImageUpload">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+              <polyline points="21 15 16 10 5 21"/>
+            </svg>
+          </button>
+          <button class="publish-send" @click="sendFromPublish" :disabled="!publishInput.trim() && !publishImages.length">
+            发布
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 图片放大查看 ===== -->
+    <div class="image-zoom" :class="{ active: zoomSrc }" @click="closeZoom">
+      <div v-if="zoomSrc" class="zoom-content" @click.stop>
+        <img :src="zoomSrc" alt="放大图片">
+        <button class="zoom-close" @click="closeZoom">×</button>
+      </div>
+    </div>
+
+    <!-- ===== 操作菜单（长按弹出） ===== -->
+    <div class="action-sheet" :class="{ active: actionNote }" @click.self="closeActionSheet">
+      <div class="sheet-backdrop" @click="closeActionSheet"></div>
+      <div class="sheet-panel">
+        <div class="sheet-handle"></div>
+        <div class="sheet-actions">
+          <button class="sheet-action" @click="copyNoteFromSheet">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            复制内容
+          </button>
+          <button class="sheet-action" @click="startEditFromSheet">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            </svg>
+            编辑笔记
+          </button>
+          <button class="sheet-action danger" @click="deleteFromSheet">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+            删除笔记
+          </button>
+        </div>
+        <button class="sheet-cancel" @click="closeActionSheet">取消</button>
+      </div>
+    </div>
+
+    <!-- ===== 编辑模态框 ===== -->
+    <div class="edit-modal" :class="{ active: editingNote }" @click.self="closeEditModal">
+      <div class="edit-panel" v-if="editingNote">
+        <div class="edit-header">
+          <span>编辑笔记</span>
+          <button class="btn-icon-sm" @click="closeEditModal">×</button>
+        </div>
+        <textarea class="edit-textarea" v-model="editText" rows="8" placeholder="编辑内容..."></textarea>
+        <div class="edit-footer">
+          <button class="btn-cancel" @click="closeEditModal">取消</button>
+          <button class="btn-primary-sm" @click="saveEdit">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 更多菜单 ===== -->
+    <div class="more-menu" :class="{ active: moreMenuOpen }" @click.self="closeMoreMenu">
+      <div class="more-backdrop" @click="closeMoreMenu"></div>
+      <div class="more-panel">
+        <div class="sheet-handle"></div>
+        <div class="sheet-actions">
+          <button class="sheet-action" v-if="isLoggedIn" @click="doSync">
+            <span>🔄</span> 手动同步
+          </button>
+          <button class="sheet-action danger" v-if="isLoggedIn" @click="doSignOut">
+            <span>🚪</span> 退出登录
+          </button>
+          <button class="sheet-action" v-if="localMode" @click="backToLogin">
+            <span>🔑</span> 登录账号
+          </button>
+        </div>
+        <button class="sheet-cancel" @click="closeMoreMenu">取消</button>
+      </div>
+    </div>
+
+    <!-- ===== Toast ===== -->
+    <div class="toast" :class="{ show: toast.show }">{{ toast.msg }}</div>
+  </div>
+</div>
+
+<!-- ===== CDN 依赖 ===== -->
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+
+<!-- ===== 共享数据层（只读） ===== -->
+<script src="./js/utils/imageHelper.js"></script>
+<script src="./js/utils/zipHelper.js"></script>
+<script src="./js/utils/flomoImport.js"></script>
+<script src="./js/db-supabase.js"></script>
+
+<!-- ===== 手机端 App ===== -->
+<script src="js/app.js"></script>
+
+</body>
+</html>

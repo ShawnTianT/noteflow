@@ -29,8 +29,8 @@
 
 ```
 /Users/tianlingxiao/Desktop/知识库/
-├── index.html              ← 入口页面（源代码，编辑这里）
-├── css/style.css          ← 样式（源代码，编辑这里）
+├── index.html              ← 桌面端入口页面（源代码，编辑这里）
+├── css/style.css          ← 桌面端样式（源代码，编辑这里）
 ├── js/                    ← 所有 JS 模块（源代码，编辑这里）
 │   ├── app.js
 │   ├── db.js              ← sql.js 本地版（本地开发用）
@@ -42,6 +42,11 @@
 │       ├── tags.js        ← 标签树、置顶、筛选
 │       ├── timeline.js    ← 时间线卡片流渲染
 │       └── user.js        ← 用户切换
+├── mobile/                ← 📱 手机端竖版页面（独立目录）
+│   ├── index.html         ← 手机端入口（引用 ../js/ 共享数据层）
+│   ├── css/mobile.css     ← 手机端样式
+│   ├── js/app.js          ← 手机端 Vue App
+│   └── AGENTS.md          ← 手机端 Agent 上下文
 ├── utils/                 ← 工具函数（源代码，编辑这里）
 ├── libs/                  ← 第三方库（sql.js 等，不要改）
 ├── data/                  ← 预填充数据库 + 图片

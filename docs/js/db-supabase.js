@@ -449,13 +449,15 @@ const DB = (() => {
     }
 
     if (search) {
-      const keyword = search.toLowerCase();
+      const keywords = search.trim().split(/\s+/).map(kw => kw.toLowerCase());
       notes = notes.filter(n => {
-        const contentMatch = n.content && n.content.toLowerCase().includes(keyword);
-        // 也搜索 tags 字段
-        const tagList = normalizeTags(n.tags);
-        const tagsMatch = tagList.some(t => t.toLowerCase().includes(keyword));
-        return contentMatch || tagsMatch;
+        // 所有关键词必须匹配（AND 逻辑）
+        return keywords.every(kw => {
+          const contentMatch = n.content && n.content.toLowerCase().includes(kw);
+          const tagList = normalizeTags(n.tags);
+          const tagsMatch = tagList.some(t => t.toLowerCase().includes(kw));
+          return contentMatch || tagsMatch;
+        });
       });
     }
 
@@ -477,7 +479,7 @@ const DB = (() => {
   }
 
   async function addNote(note) {
-    const localId = Date.now();
+    const localId = Math.floor(Date.now() + Math.random() * 10000);
     const now = new Date().toISOString();
     const uid = getCurrentUserId();
 
@@ -496,6 +498,12 @@ const DB = (() => {
     };
 
     await idbPut('notes', newNote);
+
+    // 更新标签计数
+    const tagList = normalizeTags(note.tags);
+    for (const tag of tagList) {
+      await updateTagCount(tag, 1);
+    }
 
     if (isLoggedIn()) {
       await idbPut('sync_queue', {
@@ -516,7 +524,7 @@ const DB = (() => {
 
     for (let i = 0; i < notes.length; i++) {
       const note = notes[i];
-      const localId = Date.now() + i;
+      const localId = Math.floor(Date.now() + Math.random() * 10000) + i;
 
       const newNote = {
         id: localId,
@@ -527,8 +535,8 @@ const DB = (() => {
         image_data: note.image_data || [],
         type: note.type || 'text',
         is_done: note.is_done || false,
-        created_at: note.created_at || now,
-        updated_at: note.updated_at || now,
+        created_at: note.created_at || note.createdAt || now,
+        updated_at: note.updated_at || note.updatedAt || now,
       };
 
       await idbPut('notes', newNote);
@@ -554,12 +562,24 @@ const DB = (() => {
     const note = await idbGet('notes', noteId);
     if (!note) return false;
 
+    // 更新标签计数：旧标签 -1
+    const oldTags = normalizeTags(note.tags);
+    for (const tag of oldTags) {
+      await updateTagCount(tag, -1);
+    }
+
     const updated = {
       ...note,
       ...updates,
       updated_at: new Date().toISOString(),
     };
     await idbPut('notes', updated);
+
+    // 更新标签计数：新标签 +1
+    const newTags = normalizeTags(updated.tags);
+    for (const tag of newTags) {
+      await updateTagCount(tag, 1);
+    }
 
     if (isLoggedIn()) {
       await idbPut('sync_queue', {
@@ -574,6 +594,16 @@ const DB = (() => {
   }
 
   async function deleteNote(noteId) {
+    const note = await idbGet('notes', noteId);
+
+    // 更新标签计数
+    if (note) {
+      const tags = normalizeTags(note.tags);
+      for (const tag of tags) {
+        await updateTagCount(tag, -1);
+      }
+    }
+
     await idbDelete('notes', noteId);
 
     if (isLoggedIn()) {
