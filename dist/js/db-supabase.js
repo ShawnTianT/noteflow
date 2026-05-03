@@ -450,9 +450,13 @@ const DB = (() => {
 
     if (search) {
       const keyword = search.toLowerCase();
-      notes = notes.filter(n =>
-        n.content && n.content.toLowerCase().includes(keyword)
-      );
+      notes = notes.filter(n => {
+        const contentMatch = n.content && n.content.toLowerCase().includes(keyword);
+        // 也搜索 tags 字段
+        const tagList = normalizeTags(n.tags);
+        const tagsMatch = tagList.some(t => t.toLowerCase().includes(keyword));
+        return contentMatch || tagsMatch;
+      });
     }
 
     notes.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));

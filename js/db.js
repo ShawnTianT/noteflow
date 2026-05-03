@@ -219,28 +219,59 @@ const DB = (() => {
     return null;
   }
 
+  // ==================== 工具函数 ====================
+
+  /**
+   * 标签格式归一化：接受数组或逗号字符串，统一返回数组
+   */
+  function normalizeTags(tags) {
+    if (Array.isArray(tags)) return tags;
+    if (typeof tags === 'string' && tags.trim()) {
+      return tags.split(',').map(t => t.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  /**
+   * 标签数组 → 逗号字符串（用于 SQLite 存储）
+   */
+  function tagsToString(tags) {
+    const arr = normalizeTags(tags);
+    return arr.join(',');
+  }
+
+  /**
+   * 笔记对象 tags 字段归一化：逗号字符串 → 数组
+   */
+  function normalizeNoteTags(note) {
+    if (!note) return note;
+    if (note.tags != null) {
+      note.tags = normalizeTags(note.tags);
+    }
+    return note;
+  }
+
   // ==================== 笔记操作 ====================
 
   /**
    * 添加笔记
-   * @param {Object} options
+   * @param {Object} options - tags 接受数组或逗号字符串
    */
-  function addNote({ content, tags = '', imagePaths = '', imageData = '', createdAt = null, updatedAt = null, type = 'note', isDone = 0, skipSave = false }) {
+  function addNote({ content, tags = [], imagePaths = '', imageData = '', createdAt = null, updatedAt = null, type = 'note', isDone = 0, skipSave = false }) {
     const userId = getCurrentUserId();
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const ca = createdAt || now;
     const ua = updatedAt || now;
+    const tagsStr = tagsToString(tags);
     db.run(
       "INSERT INTO notes (user_id, content, tags, image_paths, image_data, type, is_done, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [userId, content, tags, imagePaths, imageData, type, isDone, ca, ua]
+      [userId, content, tagsStr, imagePaths, imageData, type, isDone, ca, ua]
     );
 
     // 更新标签
-    if (tags) {
-      tags.split(',').forEach(tag => {
-        if (tag.trim()) updateTagCount(tag.trim(), 1);
-      });
-    }
+    normalizeTags(tags).forEach(tag => {
+      updateTagCount(tag, 1);
+    });
 
     if (!skipSave) {
       markDirty();
@@ -264,11 +295,11 @@ const DB = (() => {
       try {
         addNote({
           content: note.content,
-          tags: note.tags || '',
+          tags: note.tags || [],  // 接受数组格式
           imagePaths: note.imagePaths || '',
           imageData: note.imageData || '',
-          createdAt: note.createdAt || null,
-          updatedAt: note.updatedAt || null,
+          createdAt: note.createdAt || note.created_at || null,
+          updatedAt: note.updatedAt || note.updated_at || null,
           skipSave: true
         });
         imported++;
@@ -335,7 +366,9 @@ const DB = (() => {
     stmt.bind(params);
     const results = [];
     while (stmt.step()) {
-      results.push(stmt.getAsObject());
+      const row = stmt.getAsObject();
+      normalizeNoteTags(row);
+      results.push(row);
     }
     stmt.free();
 
@@ -382,41 +415,49 @@ const DB = (() => {
   }
 
   /**
-   * 获取单条笔记
+   * 获取单条笔记（async，与 db-supabase.js 接口一致）
    */
-  function getNoteById(id) {
+  async function getNoteById(id) {
+    return getNoteByIdSync(id);
+  }
+
+  /**
+   * 获取单条笔记（同步版本，供内部 updateNote/deleteNote 使用）
+   */
+  function getNoteByIdSync(id) {
     const stmt = db.prepare("SELECT * FROM notes WHERE id = ?");
     stmt.bind([id]);
     if (stmt.step()) {
       const row = stmt.getAsObject();
       stmt.free();
-      return row;
+      return normalizeNoteTags(row);
     }
     stmt.free();
     return null;
   }
 
   /**
-   * 更新笔记
+   * 更新笔记（tags 接受数组或逗号字符串）
    */
-  function updateNote(id, { content, tags = '', imagePaths = '', imageData = '' }) {
-    const oldNote = getNoteById(id);
-    if (oldNote && oldNote.tags) {
-      oldNote.tags.split(',').forEach(tag => {
-        if (tag.trim()) updateTagCount(tag.trim(), -1);
+  async function updateNote(id, { content, tags = [], imagePaths = '', imageData = '' }) {
+    const tagsArr = normalizeTags(tags);
+    const tagsStr = tagsToString(tags);
+
+    const oldNote = getNoteByIdSync(id);
+    if (oldNote) {
+      normalizeTags(oldNote.tags).forEach(tag => {
+        updateTagCount(tag, -1);
       });
     }
 
     db.run(
       "UPDATE notes SET content = ?, tags = ?, image_paths = ?, image_data = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-      [content, tags, imagePaths, imageData, id]
+      [content, tagsStr, imagePaths, imageData, id]
     );
 
-    if (tags) {
-      tags.split(',').forEach(tag => {
-        if (tag.trim()) updateTagCount(tag.trim(), 1);
-      });
-    }
+    tagsArr.forEach(tag => {
+      updateTagCount(tag, 1);
+    });
 
     markDirty();
     saveDb();
@@ -425,11 +466,11 @@ const DB = (() => {
   /**
    * 删除笔记
    */
-  function deleteNote(id) {
-    const note = getNoteById(id);
-    if (note && note.tags) {
-      note.tags.split(',').forEach(tag => {
-        if (tag.trim()) updateTagCount(tag.trim(), -1);
+  async function deleteNote(id) {
+    const note = getNoteByIdSync(id);
+    if (note) {
+      normalizeTags(note.tags).forEach(tag => {
+        updateTagCount(tag, -1);
       });
     }
 
@@ -492,12 +533,13 @@ const DB = (() => {
    */
   function getRandomNotes(count) {
     const userId = getCurrentUserId();
-    // SQLite 的 RANDOM() 函数
     const stmt = db.prepare("SELECT * FROM notes WHERE user_id = ? ORDER BY RANDOM() LIMIT ?");
     stmt.bind([userId, count]);
     const results = [];
     while (stmt.step()) {
-      results.push(stmt.getAsObject());
+      const row = stmt.getAsObject();
+      normalizeNoteTags(row);
+      results.push(row);
     }
     stmt.free();
     return results;
@@ -584,14 +626,14 @@ const DB = (() => {
 
   function exportAsJSON() {
     const userId = getCurrentUserId();
-    const notes = getNotes({ page: 0, pageSize: 999999 });
+    const result = getNotes({ page: 0, pageSize: 999999 });
     const tags = getTags();
 
     return JSON.stringify({
       version: '1.0',
       exported_at: new Date().toISOString(),
       user_id: userId,
-      notes,
+      notes: result.data,
       tags
     }, null, 2);
   }
