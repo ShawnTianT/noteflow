@@ -286,19 +286,23 @@ const DB = (() => {
 
   /**
    * 获取笔记列表
+   * 返回 { data, total, hasMore }
    */
   function getNotes(options = {}) {
-    const { page = 0, pageSize = 50, tag = '', search = '', date = '' } = options;
+    // 兼容 pageCurrent（从1开始）和 page（从0开始）
+    const pageCurrent = options.pageCurrent || 0;
+    const page = options.page != null ? options.page : (pageCurrent > 0 ? pageCurrent - 1 : 0);
+    const { pageSize = 50, tag = '', search = '', date = '' } = options;
     const userId = getCurrentUserId();
 
     let sql = "SELECT * FROM notes WHERE user_id = ?";
     const params = [userId];
 
     if (tag) {
-      // 支持层级标签筛选：
-      // 精确匹配 + 前缀匹配（如筛选 area's 时也能匹配 area's/跑步）
-      sql += " AND (tags LIKE ? OR tags LIKE ? OR tags LIKE ? OR tags = ? OR tags LIKE ? OR tags LIKE ?)";
-      params.push(`%,${tag},%`, `${tag},%`, `%,${tag}`, tag, `%,${tag}/%`, `${tag}/%`);
+      // tags 字段格式："tag1,tag2,tag3"（无首尾逗号）
+      // 用 ',' || tags || ',' 包裹后匹配，覆盖所有位置
+      sql += " AND (',' || tags || ',' LIKE '%,' || ? || ',%' OR tags = ?)";
+      params.push(tag, tag);
     }
 
     if (search) {
@@ -314,6 +318,16 @@ const DB = (() => {
       params.push(`${date}%`);
     }
 
+    // 先算总数
+    const countStmt = db.prepare(sql.replace(/SELECT \* FROM/, 'SELECT COUNT(*) as cnt FROM'));
+    countStmt.bind(params);
+    let total = 0;
+    if (countStmt.step()) {
+      total = countStmt.getAsObject().cnt;
+    }
+    countStmt.free();
+
+    // 再取分页数据
     sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
     params.push(pageSize, page * pageSize);
 
@@ -324,7 +338,12 @@ const DB = (() => {
       results.push(stmt.getAsObject());
     }
     stmt.free();
-    return results;
+
+    return {
+      data: results,
+      total,
+      hasMore: (page * pageSize + results.length) < total,
+    };
   }
 
   /**
@@ -338,10 +357,10 @@ const DB = (() => {
     const params = [userId];
 
     if (tag) {
-      // 支持层级标签筛选：
-      // 精确匹配 + 前缀匹配（如筛选 area's 时也能匹配 area's/跑步）
-      sql += " AND (tags LIKE ? OR tags LIKE ? OR tags LIKE ? OR tags = ? OR tags LIKE ? OR tags LIKE ?)";
-      params.push(`%,${tag},%`, `${tag},%`, `%,${tag}`, tag, `%,${tag}/%`, `${tag}/%`);
+      // tags 字段格式："tag1,tag2,tag3"（无首尾逗号）
+      // 用 ',' || tags || ',' 包裹后匹配，覆盖所有位置
+      sql += " AND (',' || tags || ',' LIKE '%,' || ? || ',%' OR tags = ?)";
+      params.push(tag, tag);
     }
 
     if (search) {
