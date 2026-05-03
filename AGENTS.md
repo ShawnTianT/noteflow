@@ -8,9 +8,20 @@
 
 本地类 flomo 笔记应用。浏览器内运行，数据存在 IndexedDB，关浏览器再开数据还在。
 
-- **技术栈**: Vue 3 CDN + sql.js + IndexedDB
-- **启动方式**: 本地 HTTP 服务器 `localhost:8765`（从 `dist/` 提供页面）
+- **技术栈**: Vue 3 CDN + sql.js / Supabase + IndexedDB
+- **启动方式**:
+  - 本地：HTTP 服务器 `localhost:8765`（从 `dist/` 提供页面）
+  - 线上：https://shawntiant.github.io/noteflow/（GitHub Pages，从 `docs/` 提供）
 - **当前版本**: 1.3.0（见 `VERSION` 文件）
+
+### 双数据库模式
+
+| 文件 | 用途 | 加载条件 |
+|---|---|---|
+| `js/db.js` | sql.js 本地版，IndexedDB 持久化 | 本地开发、无网络 |
+| `js/db-supabase.js` | Supabase 云端版，多设备同步 | 线上 GitHub Pages、登录后 |
+
+`index.html` 根据环境自动选择加载哪个 DB 文件。
 
 ---
 
@@ -22,7 +33,8 @@
 ├── css/style.css          ← 样式（源代码，编辑这里）
 ├── js/                    ← 所有 JS 模块（源代码，编辑这里）
 │   ├── app.js
-│   ├── db.js
+│   ├── db.js              ← sql.js 本地版（本地开发用）
+│   ├── db-supabase.js     ← Supabase 云端版（线上 GitHub Pages 用）
 │   └── modules/
 │       ├── editor.js      ← 输入、标签提取、图片上传
 │       ├── export.js      ← 导出（.db / .json / flomo zip）
@@ -36,27 +48,32 @@
 │   ├── noteflow_user1.db ← 用户一的初始数据（1687条笔记）
 │   └── images/           ← 图片存储目录
 │
-├── build.sh               ← 发布脚本（源代码 → dist/）
+├── build.sh               ← 发布脚本（源代码 → dist/ + docs/）
 ├── VERSION                ← 版本号
 │
-└── dist/                  ← ★ 发布目录（HTTP 服务器从这里读）
-    ├── index.html         ← 上面源文件的副本（不要直接改！）
-    ├── css/
-    ├── js/
-    ├── utils/
-    ├── libs/
-    └── data/
+├── dist/                  ← ★ 本地发布目录（HTTP 服务器从这里读）
+│   ├── index.html         ← 上面源文件的副本（不要直接改！）
+│   └── ...
+│
+└── docs/                  ← ★ 线上发布目录（GitHub Pages 从这里读）
+    ├── index.html         ← 与 dist/ 内容同步
+    └── ...
 ```
 
 ### ⚠️ 最重要的规则
 
-**`dist/` 里的文件禁止直接编辑！** 所有修改在根目录的源文件里做，然后运行：
+**`dist/` 和 `docs/` 里的文件禁止直接编辑！** 所有修改在根目录的源文件里做，然后运行：
 
 ```bash
 bash build.sh
 ```
 
-`build.sh` 会把源文件复制到 `dist/`。如果你直接改 `dist/` 里的文件，下次 `build.sh` 会把它覆盖掉。
+`build.sh` 会把源文件复制到 `dist/`（本地）和 `docs/`（线上）。如果直接改这两个目录里的文件，下次 `build.sh` 会被覆盖。
+
+推送到 GitHub Pages：
+```bash
+bash build.sh push "提交信息"
+```
 
 ---
 
@@ -141,6 +158,8 @@ element.innerHTML = `<span onclick="filterByTag('area's')">...</span>`;
 
 ## 数据库表结构
 
+### SQLite（本地 db.js）
+
 ```sql
 -- 用户表
 CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, avatar TEXT, created_at DATETIME);
@@ -150,7 +169,7 @@ CREATE TABLE notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   content TEXT,
-  tags TEXT,              -- JSON 数组，如 '["跑步","思考"]'
+  tags TEXT,              -- ⚠️ 逗号分隔字符串，如 'area,AI/prompt'（不是 JSON 数组！）
   image_paths TEXT,       -- JSON 数组，大图路径
   image_data TEXT,        -- JSON 数组，小图 base64
   type TEXT DEFAULT 'text',
@@ -169,15 +188,34 @@ CREATE TABLE tags (
 );
 ```
 
+### Supabase（线上 db-supabase.js）
+
+Supabase 的 notes 表结构类似，但 `tags` 字段是 JSON 数组格式。
+
+⚠️ **tags 格式兼容**：db-supabase.js 提供了三个工具函数处理格式差异：
+- `normalizeTags(tags)` — 将字符串/数组/JSON 统一转为数组
+- `normalizeToArray(val)` — 通用值归一化
+- `extractTagsFromContent(content)` — tags 为空时从 content 中提取 #标签 作为后备
+
+**Supabase 配置**：
+- 项目 URL：`rsqamgjvreurggjoxphq.supabase.co`
+- 默认账号：18134158895 / 123456
+- 自定义 `users` 表 + `verify_password` RPC（pgcrypto 加密）
+- 已迁移 1687 条笔记 + 134 个标签（user_id=1）
+
 ---
 
 ## 常见坑（修改前必读）
 
-### 1. 不要改 `dist/` 里的文件
+### 1. 不要改 `dist/` 和 `docs/` 里的文件
 
 改完会被 `build.sh` 覆盖。始终改根目录的源文件。
 
-### 2. sql.js prepare 后必须 free()
+### 2. 线上用的是 db-supabase.js，不是 db.js
+
+GitHub Pages 线上版本加载的是 `db-supabase.js`（Supabase 云端版）。如果你改了 `db.js` 但没改 `db-supabase.js`，线上不会生效。两个文件 API 需保持一致（函数名、返回格式）。
+
+### 3. sql.js prepare 后必须 free()
 
 ```js
 const stmt = db.prepare('SELECT...');
@@ -185,26 +223,37 @@ const stmt = db.prepare('SELECT...');
 stmt.free();  // ← 必须调用，否则内存泄漏
 ```
 
-### 3. 标签过滤逻辑在多个文件里都有
+### 4. 标签过滤逻辑在多个文件里都有
 
 改了一个文件的正则，记得同步其他三个（见上文"标签提取"部分）。
 
-### 4. 修改后用户看不到变化？
+### 5. 修改后用户看不到变化？
 
 先确认：
 1. 改的是源文件（根目录）还是 `dist/`？（应该是根目录）
 2. 有没有运行 `bash build.sh`？
 3. 浏览器有没有强刷（`Cmd+Shift+R`）？
 
-### 5. 白屏怎么排查
+### 6. 白屏怎么排查
 
 `index.html` 里有全局错误捕获，会把错误信息写到页面上。如果看到白屏，检查：
 - HTTP 服务器是否正常运行？
 - `dist/` 里的文件是否完整？（重新运行 `bash build.sh`）
 
+### 7. Supabase 中 tags 为空数组？
+
+迁移脚本用 `JSON.parse()` 解析 SQLite 中的逗号字符串会失败，导致 Supabase 中 tags 全变空数组。db-supabase.js 的 `normalizeTags()` + `extractTagsFromContent()` 已做兼容处理，但修复源数据需运行修复脚本（见下方"数据修复"部分）。
+
 ---
 
-## 用户偏好
+## GitHub Pages 部署
+
+- **仓库**: https://github.com/ShawnTianT/noteflow
+- **GitHub 用户**: ShawnTianT
+- **Pages 地址**: https://shawntiant.github.io/noteflow/
+- **Pages 来源**: main 分支 `/docs` 目录
+- **发布命令**: `bash build.sh push "提交信息"`
+- ⚠️ 公司网络连 GitHub 不稳定（443端口被拦），git push 可能需要代理或回家网络
 
 - 凌霄零编程基础，所有操作需一步到位
 - 配色偏好：浅色清新
@@ -217,8 +266,10 @@ stmt.free();  // ← 必须调用，否则内存泄漏
 
 1. 修改根目录的源文件（如 `js/modules/tags.js`）
 2. 更新 `VERSION` 文件（如 `1.3.1`）
-3. 运行 `bash build.sh`
-4. 用户强刷浏览器（`Cmd+Shift+R`）
+3. 运行 `bash build.sh`（同步到 dist/ + docs/）
+4. 本地验证：浏览器访问 `localhost:8765`，强刷（`Cmd+Shift+R`）
+5. 推线上：`bash build.sh push "提交信息"`
+6. 线上验证：访问 https://shawntiant.github.io/noteflow/
 
 ---
 
