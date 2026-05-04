@@ -379,7 +379,7 @@ const App = {
 
     updatePublishTags() {
       const text = this.publishInput;
-      const regex = /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g;
+      const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
       const tags = [];
       let match;
       while ((match = regex.exec(text)) !== null) {
@@ -548,7 +548,7 @@ const App = {
 
     // ===== 标签提取 =====
     extractTags(text) {
-      const regex = /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g;
+      const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
       const tags = [];
       let match;
       while ((match = regex.exec(text)) !== null) {
@@ -562,7 +562,7 @@ const App = {
     // ===== 标签高亮 =====
     highlightTags(html) {
       return html.replace(
-        /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g,
+        /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g,
         (match, tag) => {
           if (/^[a-zA-Z]+\d+$/.test(tag)) return match;
           return '<span class="tag-highlight">' + match + '</span>';

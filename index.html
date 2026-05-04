@@ -122,23 +122,6 @@ window.addEventListener('unhandledrejection', function(e) {
         </div>
       </header>
 
-      <!-- 编辑器 -->
-      <div class="editor-area" id="editor-area">
-        <div class="editor-wrapper">
-          <textarea id="note-input" placeholder="记录想法... Enter 发送，Shift+Enter 换行"></textarea>
-          <div id="image-preview"></div>
-          <div class="editor-toolbar">
-            <div class="tag-preview" id="tag-preview"></div>
-            <div class="editor-actions">
-              <button class="btn btn-sm btn-default" id="image-upload-btn" title="上传图片">
-                📷 图片
-              </button>
-              <button class="btn btn-sm btn-primary" onclick="Editor.sendNote(app)">发送</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- 时间线 -->
       <div class="content-area">
         <div id="notes-container" class="notes-container"></div>
@@ -148,7 +131,37 @@ window.addEventListener('unhandledrejection', function(e) {
         </div>
         <div v-if="!hasMoreNotes && notesLoaded" class="no-more">已加载全部笔记</div>
       </div>
+
+      <!-- 浮动发布按钮 -->
+      <button class="fab-publish" id="fab-publish" title="发布笔记">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
     </main>
+  </div>
+
+  <!-- ===== 发布弹窗 ===== -->
+  <div class="modal-overlay" id="publish-modal">
+    <div class="modal-content publish-modal-content">
+      <div class="modal-header">
+        <span class="modal-title">发布笔记</span>
+        <button class="modal-close" onclick="Editor.closePublishModal()">×</button>
+      </div>
+      <div class="publish-modal-body" id="editor-area">
+        <textarea id="note-input" placeholder="记录想法... Enter 发送，Shift+Enter 换行"></textarea>
+        <div id="image-preview"></div>
+        <div class="editor-toolbar">
+          <div class="tag-preview" id="tag-preview"></div>
+          <div class="editor-actions">
+            <button class="btn btn-sm btn-default" id="image-upload-btn" title="上传图片">
+              📷 图片
+            </button>
+            <button class="btn btn-sm btn-primary" onclick="Editor.sendNote(app)">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ===== 编辑模态框 ===== -->

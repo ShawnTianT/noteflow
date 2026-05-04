@@ -11,6 +11,12 @@ const Editor = (() => {
    * 初始化编辑器
    */
   function init(vm) {
+    // 浮动按钮点击 → 打开发布弹窗
+    const fabBtn = document.getElementById('fab-publish');
+    if (fabBtn) {
+      fabBtn.addEventListener('click', () => openPublishModal());
+    }
+
     // 绑定键盘事件
     const textarea = document.getElementById('note-input');
     if (textarea) {
@@ -81,9 +87,13 @@ const Editor = (() => {
     // 编辑弹窗 ESC 关闭
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        const modal = document.getElementById('edit-modal');
-        if (modal && modal.classList.contains('active')) {
+        const editModal = document.getElementById('edit-modal');
+        if (editModal && editModal.classList.contains('active')) {
           closeEditModal();
+        }
+        const publishModal = document.getElementById('publish-modal');
+        if (publishModal && publishModal.classList.contains('active')) {
+          closePublishModal();
         }
       }
     });
@@ -124,6 +134,9 @@ const Editor = (() => {
       updateImagePreview();
       updateTagPreview('');
 
+      // 关闭发布弹窗
+      closePublishModal();
+
       // 刷新时间线
       if (vm && vm.refreshNotes) vm.refreshNotes();
       if (vm && vm.refreshTags) vm.refreshTags();
@@ -140,7 +153,7 @@ const Editor = (() => {
    */
   function extractTags(text) {
     // 支持中英文、单引号、斜杠等标签字符
-    const regex = /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g;
+    const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
     const tags = [];
     let match;
     while ((match = regex.exec(text)) !== null) {
@@ -249,12 +262,39 @@ const Editor = (() => {
     }, 2000);
   }
 
+  /**
+   * 打开发布弹窗
+   */
+  function openPublishModal() {
+    const modal = document.getElementById('publish-modal');
+    if (modal) {
+      modal.classList.add('active');
+      // 聚焦输入框
+      setTimeout(() => {
+        const textarea = document.getElementById('note-input');
+        if (textarea) textarea.focus();
+      }, 100);
+    }
+  }
+
+  /**
+   * 关闭发布弹窗
+   */
+  function closePublishModal() {
+    const modal = document.getElementById('publish-modal');
+    if (modal) {
+      modal.classList.remove('active');
+    }
+  }
+
   return {
     init,
     sendNote,
     extractTags,
     removeImage,
     showToast,
-    formatSize
+    formatSize,
+    openPublishModal,
+    closePublishModal
   };
 })();

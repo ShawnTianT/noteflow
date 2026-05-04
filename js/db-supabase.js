@@ -115,7 +115,7 @@ const DB = (() => {
    */
   function extractTagsFromContent(content) {
     if (!content) return [];
-    const regex = /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g;
+    const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
     const matches = [];
     let m;
     while ((m = regex.exec(content)) !== null) {

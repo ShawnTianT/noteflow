@@ -183,7 +183,7 @@ const Timeline = (() => {
    */
   function highlightTags(html) {
     return html.replace(
-      /#([\w\u4e00-\u9fa5']+(?:\/[\w\u4e00-\u9fa5']+)*)/g,
+      /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g,
       (match, tag) => {
         if (/^[a-zA-Z]+\d+$/.test(tag)) return match;
         return `<span class="tag-highlight">${match}</span>`;
