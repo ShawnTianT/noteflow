@@ -8,11 +8,13 @@ const SearchModule = (() => {
   const DEBOUNCE_DELAY = 300;
 
   /**
-   * 初始化搜索框
+   * 初始化搜索框（幂等）
+   * Vue v-else 重渲染时 search-input 是新 DOM 节点，旧标记丢失，新节点会重新绑定
    */
   function init(vm) {
     const input = document.getElementById('search-input');
-    if (!input) return;
+    if (!input || input._searchBound) return;
+    input._searchBound = true;
 
     input.addEventListener('input', (e) => {
       clearTimeout(debounceTimer);

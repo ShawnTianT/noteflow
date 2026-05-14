@@ -32,6 +32,8 @@ const App = {
       tags: [],
       currentTag: '',
       tagSearchKey: '',
+      tagSearchDebounced: '', // P6: debounced 后的值，computed 用这个
+      tagSearchTimer: null,
       tagDrawerOpen: false,
       expandedTags: new Set(),
       pinnedTags: [],
@@ -70,9 +72,11 @@ const App = {
 
   computed: {
     // 标签按层级分组（支持搜索）
+    // P6 修复：用 tagSearchDebounced 触发，避免每次 keystroke 都重算 134 个 tag 的层级树
     filteredGroupedTags() {
-      const tags = this.tagSearchKey
-        ? this.tags.filter(t => t.name.toLowerCase().includes(this.tagSearchKey.toLowerCase()))
+      const key = this.tagSearchDebounced;
+      const tags = key
+        ? this.tags.filter(t => t.name.toLowerCase().includes(key.toLowerCase()))
         : this.tags;
 
       const grouped = {};
@@ -96,6 +100,16 @@ const App = {
       const rest = Object.keys(grouped).filter(k => !this.pinnedTags.includes(k)).sort((a, b) => grouped[b].total - grouped[a].total);
       [...pinnedFirst, ...rest].forEach(k => { sorted[k] = grouped[k]; });
       return sorted;
+    },
+  },
+
+  watch: {
+    // P6: 标签搜索 200ms debounce，避免每次输入都重算 computed
+    tagSearchKey(newVal) {
+      clearTimeout(this.tagSearchTimer);
+      this.tagSearchTimer = setTimeout(() => {
+        this.tagSearchDebounced = newVal;
+      }, 200);
     },
   },
 

@@ -127,6 +127,13 @@ const app = {
         this.userUsername = this.loginUsername;
         this.currentUserId = DB.getCurrentUserId();
 
+        // Vue v-else 主界面渲染完成后才能拿到 #fab-publish 等元素
+        await this.$nextTick();
+
+        // 绑定 FAB 按钮、textarea、搜索框等 listener（首次/重登都需要）
+        Editor.init(this);
+        SearchModule.init(this);
+
         await this.refreshNotes();
         await this.refreshTags();
 
@@ -157,11 +164,13 @@ const app = {
       this.isLoggedIn = false;
       this.currentUserId = DB.getCurrentUserId();
 
-      this.refreshNotes();
-      this.refreshTags();
-
-      Editor.init(this);
-      SearchModule.init(this);
+      // 等 Vue 渲染主界面 DOM 后再绑定 FAB / textarea / 搜索框 listener
+      this.$nextTick(async () => {
+        await this.refreshNotes();
+        await this.refreshTags();
+        Editor.init(this);
+        SearchModule.init(this);
+      });
     },
 
     async manualSync() {

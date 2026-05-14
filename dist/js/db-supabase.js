@@ -22,6 +22,13 @@ const DB = (() => {
   // ID 映射：本地临时 ID → 云端真实 ID
   const idMap = new Map();
 
+  // 本地 ID 生成器（避免 Date.now()+random 在批量插入时撞 ID）
+  let _idCounter = 0;
+  function makeLocalId() {
+    _idCounter = (_idCounter + 1) % 10000;
+    return Date.now() * 10000 + _idCounter;
+  }
+
   // ================================================
   // IndexedDB 操作
   // ================================================
@@ -185,9 +192,9 @@ const DB = (() => {
       console.warn('[DB] Supabase 初始化失败，仅本地模式:', e.message);
     }
 
-    // 未登录：不自动进入本地模式，让用户界面选择
+    // 未登录：检查上次是否选择了本地模式（C 修复：localMode 持久化）
     if (!currentUserId) {
-      isLocalMode = false;
+      isLocalMode = localStorage.getItem('noteflow_local_mode') === '1';
     }
 
     return true;
@@ -232,9 +239,10 @@ const DB = (() => {
     currentUsername = data[0].user_username;
     isLocalMode = false;
 
-    // 持久化登录状态
+    // 持久化登录状态（清除可能存在的本地模式 flag）
     localStorage.setItem('noteflow_user_id', currentUserId);
     localStorage.setItem('noteflow_username', currentUsername);
+    localStorage.removeItem('noteflow_local_mode');
 
     // 从云端同步数据
     await syncFromCloud();
@@ -242,26 +250,55 @@ const DB = (() => {
     return { data: { user: { id: currentUserId, username: currentUsername } }, error: null };
   }
 
-  // 退出登录
+  // 退出登录（F 修复：清当前用户的本地缓存，避免账号串数据）
   async function signOut() {
+    if (currentUserId && idbDb) {
+      const uid = currentUserId;
+      try {
+        await new Promise((resolve, reject) => {
+          const tx = idbDb.transaction(['notes', 'tags', 'sync_queue'], 'readwrite');
+          // 删当前用户 notes
+          const noteIdx = tx.objectStore('notes').index('user_id');
+          const noteReq = noteIdx.openCursor(IDBKeyRange.only(uid));
+          noteReq.onsuccess = (e) => {
+            const c = e.target.result;
+            if (c) { c.delete(); c.continue(); }
+          };
+          // 删当前用户 tags
+          const tagIdx = tx.objectStore('tags').index('user_id');
+          const tagReq = tagIdx.openCursor(IDBKeyRange.only(uid));
+          tagReq.onsuccess = (e) => {
+            const c = e.target.result;
+            if (c) { c.delete(); c.continue(); }
+          };
+          // sync_queue 是用户作用域的，整个清空
+          tx.objectStore('sync_queue').clear();
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      } catch (e) {
+        console.warn('[signOut] 清本地缓存失败:', e.message);
+      }
+    }
+
     currentUserId = null;
     currentUsername = null;
     isLocalMode = false;
+    idMap.clear();
 
     localStorage.removeItem('noteflow_user_id');
     localStorage.removeItem('noteflow_username');
-
-    // 清空本地缓存（可选，保留可离线查看）
-    // await idbClear('notes');
-    // await idbClear('tags');
+    localStorage.removeItem('noteflow_local_mode');
   }
 
   // 本地模式：不登录，使用本地 IndexedDB 中已有的数据
   // 本地模式下 currentUserId 为 null，getNotes 会返回所有本地缓存数据
+  // C 修复：持久化 flag，刷新页面不会回到登录页
   function enterLocalMode() {
     isLocalMode = true;
     currentUserId = null;
     currentUsername = '';
+    localStorage.setItem('noteflow_local_mode', '1');
   }
 
   // ================================================
@@ -273,6 +310,7 @@ const DB = (() => {
     if (!isLoggedIn() || !supabase || syncInProgress) return;
     syncInProgress = true;
     try {
+      // 1. 从云端拉所有笔记
       let allNotes = [];
       let page = 0;
       const pageSize = 200;
@@ -290,30 +328,76 @@ const DB = (() => {
         page++;
       }
 
-      await idbClear('notes');
-      for (const note of allNotes) {
-        const normalized = {
+      // 2. 一次性归一化（P5 修复：tags 提前提取，避免 getNotes filter 热路径反复跑正则）
+      const normalizedNotes = allNotes.map(note => {
+        let tagList = normalizeTags(note.tags);
+        if (tagList.length === 0 && note.content) {
+          tagList = extractTagsFromContent(note.content);
+        }
+        return {
           ...note,
-          tags: normalizeTags(note.tags),
+          tags: tagList,
           image_paths: normalizeToArray(note.image_paths),
           image_data: normalizeToArray(note.image_data),
           is_done: note.is_done === true || note.is_done === 1,
         };
-        await idbPut('notes', normalized);
-      }
+      });
 
+      const uid = currentUserId;
+
+      // 3. 单事务：删当前用户旧 notes + 批量 put 新 notes
+      // A 修复：原子操作，UI 不会看到中间空白态
+      // B 修复：只删当前用户的，不动其他账号缓存
+      // P1 修复：批量 put 在同一事务，~10x 提速
+      await new Promise((resolve, reject) => {
+        const tx = idbDb.transaction('notes', 'readwrite');
+        const store = tx.objectStore('notes');
+        const idx = store.index('user_id');
+        const delReq = idx.openCursor(IDBKeyRange.only(uid));
+        let deletePhaseDone = false;
+        delReq.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            cursor.delete();
+            cursor.continue();
+          } else if (!deletePhaseDone) {
+            deletePhaseDone = true;
+            for (const note of normalizedNotes) store.put(note);
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('notes sync tx aborted'));
+      });
+
+      // 4. 同步 tags：拉云端 + 单事务原子替换当前用户记录
       const { data: tags, error: tagError } = await supabase
         .from('tags')
         .select('*')
         .eq('user_id', currentUserId);
       if (!tagError && tags) {
-        await idbClear('tags');
-        for (const tag of tags) {
-          await idbPut('tags', tag);
-        }
+        await new Promise((resolve, reject) => {
+          const tx = idbDb.transaction('tags', 'readwrite');
+          const store = tx.objectStore('tags');
+          const idx = store.index('user_id');
+          const delReq = idx.openCursor(IDBKeyRange.only(uid));
+          let deletePhaseDone = false;
+          delReq.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            } else if (!deletePhaseDone) {
+              deletePhaseDone = true;
+              for (const tag of tags) store.put(tag);
+            }
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
       }
 
-      console.log(`[sync] 从云端同步了 ${allNotes.length} 条笔记, ${tags ? tags.length : 0} 个标签`);
+      console.log(`[sync] 从云端同步了 ${normalizedNotes.length} 条笔记, ${tags ? tags.length : 0} 个标签`);
     } catch (err) {
       console.warn('[sync] 从云端同步失败:', err.message);
     } finally {
@@ -479,7 +563,7 @@ const DB = (() => {
   }
 
   async function addNote(note) {
-    const localId = Math.floor(Date.now() + Math.random() * 10000);
+    const localId = makeLocalId();
     const now = new Date().toISOString();
     const uid = getCurrentUserId();
 
@@ -497,22 +581,63 @@ const DB = (() => {
       _local: true,
     };
 
-    await idbPut('notes', newNote);
-
-    // 更新标签计数
     const tagList = normalizeTags(note.tags);
-    for (const tag of tagList) {
-      await updateTagCount(tag, 1);
-    }
 
-    if (isLoggedIn()) {
-      await idbPut('sync_queue', {
-        localId,
-        action: 'insert',
-        data: { ...newNote },
-      });
-      syncToCloud();
-    }
+    // P8 修复：notes + tags + sync_queue 一次事务搞定，避免 N+1 次 idbGetAllByIndex
+    await new Promise((resolve, reject) => {
+      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+      const tx = idbDb.transaction(stores, 'readwrite');
+      tx.objectStore('notes').put(newNote);
+
+      if (tagList.length > 0) {
+        const tagStore = tx.objectStore('tags');
+        // 一次性读出当前用户所有 tag 到内存
+        const req = uid
+          ? tagStore.index('user_id').getAll(IDBKeyRange.only(uid))
+          : tagStore.getAll();
+        req.onsuccess = () => {
+          const existingTags = req.result || [];
+          const tagMap = new Map(existingTags.map(t => [t.name, t]));
+          for (const tagName of tagList) {
+            let tag = tagMap.get(tagName);
+            if (!tag) {
+              tag = { id: makeLocalId(), user_id: uid, name: tagName, count: 1 };
+            } else {
+              tag.count = (tag.count || 0) + 1;
+            }
+            tagStore.put(tag);
+            if (isLoggedIn()) {
+              tx.objectStore('sync_queue').put({
+                localId: 'tag_' + tagName,
+                action: 'updateTag',
+                tagName,
+                count: tag.count,
+              });
+            }
+          }
+          // notes 的 sync_queue 也在同事务内入队
+          if (isLoggedIn()) {
+            tx.objectStore('sync_queue').put({
+              localId,
+              action: 'insert',
+              data: { ...newNote },
+            });
+          }
+        };
+      } else if (isLoggedIn()) {
+        tx.objectStore('sync_queue').put({
+          localId,
+          action: 'insert',
+          data: { ...newNote },
+        });
+      }
+
+      tx.oncomplete = () => {
+        if (isLoggedIn()) syncToCloud();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
 
     return newNote;
   }
@@ -524,7 +649,7 @@ const DB = (() => {
 
     for (let i = 0; i < notes.length; i++) {
       const note = notes[i];
-      const localId = Math.floor(Date.now() + Math.random() * 10000) + i;
+      const localId = makeLocalId();
 
       const newNote = {
         id: localId,
@@ -657,33 +782,46 @@ const DB = (() => {
     return tags.sort((a, b) => b.count - a.count);
   }
 
+  // E 修复：读改写包进单事务，避免并发场景下计数丢失
+  // D 修复：新建 tag 用 makeLocalId，避免多个新 tag 同 ms 撞 ID
   async function updateTagCount(tagName, delta, userId) {
     const uid = userId || getCurrentUserId();
-    let tags;
-    if (uid) {
-      tags = await idbGetAllByIndex('tags', 'user_id', uid);
-    } else {
-      tags = await idbGetAll('tags');
-    }
-    let tag = tags.find(t => t.name === tagName);
+    return new Promise((resolve, reject) => {
+      const stores = isLoggedIn() ? ['tags', 'sync_queue'] : ['tags'];
+      const tx = idbDb.transaction(stores, 'readwrite');
+      const tagStore = tx.objectStore('tags');
 
-    if (delta > 0 && !tag) {
-      tag = { id: Date.now(), user_id: uid, name: tagName, count: 0 };
-    }
-    if (tag) {
-      tag.count = Math.max(0, tag.count + delta);
-      await idbPut('tags', tag);
-
-      if (isLoggedIn()) {
-        await idbPut('sync_queue', {
-          localId: 'tag_' + tagName,
-          action: 'updateTag',
-          tagName,
-          count: tag.count,
-        });
-        syncToCloud();
+      let req;
+      if (uid) {
+        req = tagStore.index('user_id').getAll(IDBKeyRange.only(uid));
+      } else {
+        req = tagStore.getAll();
       }
-    }
+      req.onsuccess = () => {
+        const tags = req.result || [];
+        let tag = tags.find(t => t.name === tagName);
+        if (delta > 0 && !tag) {
+          tag = { id: makeLocalId(), user_id: uid, name: tagName, count: 0 };
+        }
+        if (tag) {
+          tag.count = Math.max(0, tag.count + delta);
+          tagStore.put(tag);
+          if (isLoggedIn()) {
+            tx.objectStore('sync_queue').put({
+              localId: 'tag_' + tagName,
+              action: 'updateTag',
+              tagName,
+              count: tag.count,
+            });
+          }
+        }
+      };
+      tx.oncomplete = () => {
+        if (isLoggedIn()) syncToCloud();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
   }
 
   async function rebuildTagCounts(userId) {
@@ -706,7 +844,7 @@ const DB = (() => {
     await idbClear('tags');
     const result = [];
     for (const [name, count] of Object.entries(tagCountMap)) {
-      const tag = { id: Date.now() + Math.random(), user_id: uid, name, count };
+      const tag = { id: makeLocalId(), user_id: uid, name, count };
       await idbPut('tags', tag);
       result.push(tag);
     }

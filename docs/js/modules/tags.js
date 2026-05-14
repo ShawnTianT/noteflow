@@ -107,9 +107,15 @@ const TagsModule = (() => {
   }
 
   /**
-   * 构建标签树
+   * 构建标签树（P3：按 tags 数组身份缓存，避免重复构建）
+   * 同一个 tags 引用 + 同样的 length 命中缓存。app.refreshTags 会重新赋值 this.tags，
+   * 引用变化时缓存自动失效；中间手动改 push/splice 同一数组时也会失效（length 变化）。
    */
+  let _treeCache = { tagsRef: null, tagsLen: -1, tree: null };
   function buildTagTree(tags) {
+    if (_treeCache.tagsRef === tags && _treeCache.tagsLen === tags.length && _treeCache.tree) {
+      return _treeCache.tree;
+    }
     const rootMap = new Map();
 
     tags.forEach(tag => {
@@ -138,6 +144,7 @@ const TagsModule = (() => {
       node.children.sort((a, b) => b.count - a.count);
     });
 
+    _treeCache = { tagsRef: tags, tagsLen: tags.length, tree: result };
     return result;
   }
 

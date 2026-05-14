@@ -6,20 +6,28 @@
 const Editor = (() => {
 
   let pendingImages = []; // 待发送的图片预览
+  let vmRef = null;       // Vue 实例引用（document listener 闭包用）
+  let globalListenersAttached = false; // document 级 listener 仅绑一次
 
   /**
-   * 初始化编辑器
+   * 初始化编辑器（幂等）
+   * - element listener（fab/textarea/upload/editor-area）：每次 init 检查并绑定，
+   *   通过元素 _editorBound 标记避免重复（Vue v-else 重渲染会创建新 DOM 节点，标记自然失效）
+   * - document listener（paste/keydown）：进程内只绑一次
    */
   function init(vm) {
+    vmRef = vm;
+
     // 浮动按钮点击 → 打开发布弹窗
     const fabBtn = document.getElementById('fab-publish');
-    if (fabBtn) {
+    if (fabBtn && !fabBtn._editorBound) {
       fabBtn.addEventListener('click', () => openPublishModal());
+      fabBtn._editorBound = true;
     }
 
     // 绑定键盘事件
     const textarea = document.getElementById('note-input');
-    if (textarea) {
+    if (textarea && !textarea._editorBound) {
       textarea.addEventListener('keydown', (e) => {
         if (e.key === 'Tab') {
           e.preventDefault();
@@ -32,7 +40,7 @@ const Editor = (() => {
         }
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
-          sendNote(vm);
+          sendNote(vmRef);
         }
       });
 
@@ -40,24 +48,26 @@ const Editor = (() => {
       textarea.addEventListener('input', () => {
         updateTagPreview(textarea.value);
       });
+      textarea._editorBound = true;
     }
 
     // 绑定图片上传按钮
     const uploadBtn = document.getElementById('image-upload-btn');
-    if (uploadBtn) {
+    if (uploadBtn && !uploadBtn._editorBound) {
       uploadBtn.addEventListener('click', () => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = 'image/*';
         input.multiple = true;
-        input.onchange = (e) => handleImageFiles(e.target.files, vm);
+        input.onchange = (e) => handleImageFiles(e.target.files, vmRef);
         input.click();
       });
+      uploadBtn._editorBound = true;
     }
 
     // 绑定拖拽上传
     const editorArea = document.getElementById('editor-area');
-    if (editorArea) {
+    if (editorArea && !editorArea._editorBound) {
       editorArea.addEventListener('dragover', (e) => {
         e.preventDefault();
         editorArea.classList.add('drag-over');
@@ -69,34 +79,40 @@ const Editor = (() => {
         e.preventDefault();
         editorArea.classList.remove('drag-over');
         const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
-        if (files.length) handleImageFiles(files, vm);
+        if (files.length) handleImageFiles(files, vmRef);
       });
+      editorArea._editorBound = true;
     }
 
-    // 绑定粘贴上传
-    document.addEventListener('paste', (e) => {
-      const items = [...(e.clipboardData?.items || [])];
-      const imageItems = items.filter(item => item.type.startsWith('image/'));
-      if (imageItems.length) {
-        e.preventDefault();
-        const files = imageItems.map(item => item.getAsFile()).filter(Boolean);
-        handleImageFiles(files, vm);
-      }
-    });
+    // document 级 listener（paste / ESC 关闭）—— 全局只绑一次
+    if (!globalListenersAttached) {
+      // 绑定粘贴上传
+      document.addEventListener('paste', (e) => {
+        const items = [...(e.clipboardData?.items || [])];
+        const imageItems = items.filter(item => item.type.startsWith('image/'));
+        if (imageItems.length) {
+          e.preventDefault();
+          const files = imageItems.map(item => item.getAsFile()).filter(Boolean);
+          handleImageFiles(files, vmRef);
+        }
+      });
 
-    // 编辑弹窗 ESC 关闭
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        const editModal = document.getElementById('edit-modal');
-        if (editModal && editModal.classList.contains('active')) {
-          closeEditModal();
+      // 编辑弹窗 ESC 关闭
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          const editModal = document.getElementById('edit-modal');
+          if (editModal && editModal.classList.contains('active')) {
+            closeEditModal();
+          }
+          const publishModal = document.getElementById('publish-modal');
+          if (publishModal && publishModal.classList.contains('active')) {
+            closePublishModal();
+          }
         }
-        const publishModal = document.getElementById('publish-modal');
-        if (publishModal && publishModal.classList.contains('active')) {
-          closePublishModal();
-        }
-      }
-    });
+      });
+
+      globalListenersAttached = true;
+    }
   }
 
   /**
