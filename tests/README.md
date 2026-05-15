@@ -7,7 +7,7 @@
 ```bash
 node tests/run-all.cjs               # 全跑
 node tests/unit/extractTags.test.cjs # 单跑某文件
-node tests/check-regex-sync.cjs      # 跨文件正则一致性
+node tests/check-regex-sync.cjs      # 跨文件正则一致性（Task 7 之后可用）
 ```
 
 ## 添加新测试
