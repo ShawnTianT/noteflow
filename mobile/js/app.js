@@ -115,6 +115,15 @@ const App = {
 
   async mounted() {
     console.log('[Mobile] 开始初始化...');
+
+    // 监听后台同步完成事件（修复首次加载时机问题）
+    window.addEventListener('noteflow:sync-complete', () => {
+      if (this.isLoggedIn || this.localMode) {
+        this.refreshNotes();
+        this.refreshTags();
+      }
+    });
+
     try {
       if (!DB) throw new Error('DB 对象未定义！检查 db-supabase.js 是否加载');
 

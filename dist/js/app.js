@@ -59,6 +59,14 @@ const app = {
 
   // ==================== 生命周期 ====================
   async mounted() {
+    // 监听后台同步完成事件（修复首次加载时机问题：sync 完成后 UI 自动补一次刷新）
+    window.addEventListener('noteflow:sync-complete', () => {
+      if (this.isLoggedIn || this.localMode) {
+        this.refreshNotes();
+        this.refreshTags();
+      }
+    });
+
     try {
       await DB.init();
       this.isLoggedIn = DB.isLoggedIn();
