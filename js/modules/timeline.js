@@ -182,13 +182,21 @@ const Timeline = (() => {
    * 高亮 #标签
    */
   function highlightTags(html) {
-    return html.replace(
+    // 用占位符保护 URL，避免 URL 内的 #frag 被高亮成 tag
+    const urls = [];
+    html = html.replace(/https?:\/\/\S+/g, (m) => {
+      urls.push(m);
+      return '\x00URL' + (urls.length - 1) + '\x00';
+    });
+    const highlighted = html.replace(
       /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g,
       (match, tag) => {
         if (/^[a-zA-Z]+\d+$/.test(tag)) return match;
         return `<span class="tag-highlight">${match}</span>`;
       }
     );
+    // 还原 URL 占位符
+    return highlighted.replace(/\x00URL(\d+)\x00/g, (_, i) => urls[+i]);
   }
 
   /**

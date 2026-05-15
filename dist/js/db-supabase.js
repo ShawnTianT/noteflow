@@ -117,16 +117,23 @@ const DB = (() => {
   // 数据格式归一化工具
   // ================================================
 
+  // URL 过滤：避免 https://x.com/#frag 这种 fragment 被误识为 tag
+  const URL_REGEX = /https?:\/\/\S+/g;
+  function stripUrls(text) { return (text || '').replace(URL_REGEX, ' '); }
+
   /**
-   * 从笔记内容中提取标签（后备方案，当 tags 字段为空时）
+   * 从笔记内容中提取标签（剥 URL 后用统一正则；过滤纯英文+数字尾缀如 campaign2）
    */
   function extractTagsFromContent(content) {
     if (!content) return [];
+    const cleaned = stripUrls(content);
     const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
     const matches = [];
     let m;
-    while ((m = regex.exec(content)) !== null) {
-      matches.push(m[1]);
+    while ((m = regex.exec(cleaned)) !== null) {
+      const tag = m[1];
+      if (/^[a-zA-Z]+\d+$/.test(tag)) continue;
+      if (!matches.includes(tag)) matches.push(tag);
     }
     return matches;
   }
@@ -328,12 +335,13 @@ const DB = (() => {
         page++;
       }
 
-      // 2. 一次性归一化（P5 修复：tags 提前提取，避免 getNotes filter 热路径反复跑正则）
+      // 2. 一次性归一化
+      // P5 修复：tags 提前提取，避免 getNotes filter 热路径反复跑正则
+      // URL 修复：始终从 content 重新提取（用新 URL-aware 正则），云端老 tags 字段可能含污染数据，不可信
       const normalizedNotes = allNotes.map(note => {
-        let tagList = normalizeTags(note.tags);
-        if (tagList.length === 0 && note.content) {
-          tagList = extractTagsFromContent(note.content);
-        }
+        const tagList = note.content
+          ? extractTagsFromContent(note.content)
+          : normalizeTags(note.tags);
         return {
           ...note,
           tags: tagList,
@@ -370,34 +378,11 @@ const DB = (() => {
         tx.onabort = () => reject(tx.error || new Error('notes sync tx aborted'));
       });
 
-      // 4. 同步 tags：拉云端 + 单事务原子替换当前用户记录
-      const { data: tags, error: tagError } = await supabase
-        .from('tags')
-        .select('*')
-        .eq('user_id', currentUserId);
-      if (!tagError && tags) {
-        await new Promise((resolve, reject) => {
-          const tx = idbDb.transaction('tags', 'readwrite');
-          const store = tx.objectStore('tags');
-          const idx = store.index('user_id');
-          const delReq = idx.openCursor(IDBKeyRange.only(uid));
-          let deletePhaseDone = false;
-          delReq.onsuccess = (e) => {
-            const cursor = e.target.result;
-            if (cursor) {
-              cursor.delete();
-              cursor.continue();
-            } else if (!deletePhaseDone) {
-              deletePhaseDone = true;
-              for (const tag of tags) store.put(tag);
-            }
-          };
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        });
-      }
+      // 4. 标签：不再拉云端 tags 表（可能含 URL 污染或孤儿）
+      //    直接基于已经清理过的本地 notes 重建 → 自动剔除 #p-1 / #wechat_redirect / 空标签
+      const rebuiltTags = await rebuildTagCounts(uid);
 
-      console.log(`[sync] 从云端同步了 ${normalizedNotes.length} 条笔记, ${tags ? tags.length : 0} 个标签`);
+      console.log(`[sync] 从云端同步了 ${normalizedNotes.length} 条笔记, ${rebuiltTags.length} 个标签（本地重建）`);
 
       // 通知 UI 自动刷新（修复首次加载时机问题：refreshNotes 早于 sync 完成时，UI 自动补一次刷新）
       window.dispatchEvent(new CustomEvent('noteflow:sync-complete', {
@@ -467,15 +452,24 @@ const DB = (() => {
               .single();
 
             if (existing) {
-              await supabase
-                .from('tags')
-                .update({ count: item.count })
-                .eq('id', existing.id);
+              if (item.count > 0) {
+                await supabase
+                  .from('tags')
+                  .update({ count: item.count })
+                  .eq('id', existing.id);
+              } else {
+                // 孤儿清理：count=0 时删除云端标签
+                await supabase
+                  .from('tags')
+                  .delete()
+                  .eq('id', existing.id);
+              }
             } else if (item.count > 0) {
               await supabase
                 .from('tags')
                 .insert({ user_id: currentUserId, name: item.tagName, count: item.count });
             }
+            // count=0 + 云端不存在 → 啥也不做
             await idbDelete('sync_queue', item.localId);
           }
         } catch (e) {
@@ -810,13 +804,18 @@ const DB = (() => {
         }
         if (tag) {
           tag.count = Math.max(0, tag.count + delta);
-          tagStore.put(tag);
+          // 孤儿清理：count→0 时删除标签，不留空壳
+          if (tag.count === 0 && tag.id != null) {
+            tagStore.delete(tag.id);
+          } else {
+            tagStore.put(tag);
+          }
           if (isLoggedIn()) {
             tx.objectStore('sync_queue').put({
               localId: 'tag_' + tagName,
               action: 'updateTag',
               tagName,
-              count: tag.count,
+              count: tag.count, // count=0 → syncToCloud 处理为云端删除
             });
           }
         }
@@ -829,6 +828,8 @@ const DB = (() => {
     });
   }
 
+  // 重建当前用户的 tag 表（基于 notes.tags 真值）
+  // 用途：syncFromCloud 后调一次，自动剔除 URL 污染产生的旧 tag、count=0 的孤儿 tag
   async function rebuildTagCounts(userId) {
     const uid = userId || getCurrentUserId();
     let notes;
@@ -838,7 +839,6 @@ const DB = (() => {
       notes = await idbGetAll('notes');
     }
     const tagCountMap = {};
-
     for (const note of notes) {
       const tags = normalizeTags(note.tags);
       for (const tag of tags) {
@@ -846,13 +846,39 @@ const DB = (() => {
       }
     }
 
-    await idbClear('tags');
+    // 单事务：删当前用户旧 tags + 写新 tags（避免误清其他账号缓存）
     const result = [];
-    for (const [name, count] of Object.entries(tagCountMap)) {
-      const tag = { id: makeLocalId(), user_id: uid, name, count };
-      await idbPut('tags', tag);
-      result.push(tag);
-    }
+    await new Promise((resolve, reject) => {
+      const tx = idbDb.transaction('tags', 'readwrite');
+      const store = tx.objectStore('tags');
+      let deletePhaseDone = false;
+
+      const onDeleteDone = () => {
+        if (deletePhaseDone) return;
+        deletePhaseDone = true;
+        for (const [name, count] of Object.entries(tagCountMap)) {
+          const tag = { id: makeLocalId(), user_id: uid, name, count };
+          store.put(tag);
+          result.push(tag);
+        }
+      };
+
+      if (uid) {
+        const idx = store.index('user_id');
+        const delReq = idx.openCursor(IDBKeyRange.only(uid));
+        delReq.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) { cursor.delete(); cursor.continue(); }
+          else { onDeleteDone(); }
+        };
+      } else {
+        // 未登录/本地模式：清整张 tags 表（旧行为兼容）
+        store.clear();
+        onDeleteDone();
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
     return result;
   }
 

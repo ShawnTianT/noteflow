@@ -168,7 +168,8 @@ const Editor = (() => {
    * 从文本中提取 #标签
    */
   function extractTags(text) {
-    // 支持中英文、单引号、斜杠等标签字符
+    // 先剥 URL 避免 https://x.com/#frag 被误识为标签；再支持中英文、单引号、连字符、斜杠
+    text = (text || '').replace(/https?:\/\/\S+/g, ' ');
     const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
     const tags = [];
     let match;

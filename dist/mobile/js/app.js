@@ -571,6 +571,8 @@ const App = {
 
     // ===== 标签提取 =====
     extractTags(text) {
+      // \u5148\u5265 URL\uff0c\u907f\u514d fragment \u88ab\u8bc6\u522b\u4e3a tag
+      text = (text || '').replace(/https?:\/\/\S+/g, ' ');
       const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
       const tags = [];
       let match;
@@ -582,15 +584,23 @@ const App = {
       return tags;
     },
 
-    // ===== 标签高亮 =====
+    // ===== 标签高亮（占位符保护 URL）=====
     highlightTags(html) {
-      return html.replace(
+      // 先用占位符保护 URL，避免 URL 内的 #frag 被高亮
+      const _urls = [];
+      html = html.replace(/https?:\/\/\S+/g, (m) => {
+        _urls.push(m);
+        return '\x00URL' + (_urls.length - 1) + '\x00';
+      });
+      const highlighted = html.replace(
         /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g,
         (match, tag) => {
           if (/^[a-zA-Z]+\d+$/.test(tag)) return match;
           return '<span class="tag-highlight">' + match + '</span>';
         }
       );
+      // \u8fd8\u539f URL \u5360\u4f4d\u7b26
+      return highlighted.replace(/\x00URL(\d+)\x00/g, (_, i) => _urls[+i]);
     },
 
     escapeHtml(text) {
