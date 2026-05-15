@@ -30,7 +30,7 @@ echo "   版本: $VERSION"
 # 同步函数：将源文件复制到目标目录
 sync_to_dir() {
   local TARGET="$1"
-  rm -rf "$TARGET/css" "$TARGET/js" "$TARGET/libs" "$TARGET/utils" "$TARGET/data" "$TARGET/index.html" "$TARGET/VERSION" 2>/dev/null
+  rm -rf "$TARGET/css" "$TARGET/js" "$TARGET/libs" "$TARGET/utils" "$TARGET/data" "$TARGET/mobile" "$TARGET/index.html" "$TARGET/VERSION" 2>/dev/null
   cp -r "$SRC_DIR/css" "$TARGET/"
   cp -r "$SRC_DIR/js" "$TARGET/"
   cp -r "$SRC_DIR/data" "$TARGET/"
@@ -39,6 +39,14 @@ sync_to_dir() {
   cp "$SRC_DIR/index.html" "$TARGET/"
   cp "$SRC_DIR/VERSION" "$TARGET/"
   mkdir -p "$TARGET/data/images"
+
+  # 手机端：复制 mobile/ 目录
+  cp -r "$SRC_DIR/mobile" "$TARGET/"
+
+  # 注意：mobile/index.html 中共享 JS 文件（db-supabase.js 等）保持 ../js/ 路径
+  # 指向父目录的 js/，不改为 ./js/（mobile/js/ 下只有 app.js）
+  # 修正 mobile/index.html 中 app.js 的引用（源码是 js/app.js，构建后应为 js/app.js，已正确）
+  :
 }
 
 # 1. 同步到 dist/（本地服务器用）
@@ -63,7 +71,7 @@ if [ "$PUSH_MODE" = true ]; then
     COMMIT_MSG="v$VERSION"
   fi
 
-  git add "$DIST_DIR/" "$DOCS_DIR/" index.html css/ js/ utils/ VERSION AGENTS.md
+  git add "$DIST_DIR/" "$DOCS_DIR/" index.html css/ js/ utils/ mobile/ VERSION AGENTS.md
   git commit -m "$COMMIT_MSG"
   git push origin main
 
