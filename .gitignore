@@ -34,3 +34,6 @@ com.noteflow.server.plist
 start-server.sh
 sqlpub-proxy-server.js
 SQLPUB_PROXY_README.md
+
+# Supabase 用户添加脚本（含密码 hash 调用，不入仓库）
+add-user-*.sql
