@@ -142,6 +142,12 @@ window.addEventListener('unhandledrejection', function(e) {
         <span class="tag-label">#{{ currentTag }}</span>
         <span class="clear-tag">×</span>
       </div>
+
+      <!-- MOB-9: 回顾模式提示 + 返回全部 -->
+      <div class="current-tag-bar" v-if="reviewMode" @click="exitReview">
+        <span class="tag-label">📖 随机回顾</span>
+        <span class="clear-tag">返回全部</span>
+      </div>
     </header>
 
     <!-- ===== 中间可滚动区域 ===== -->

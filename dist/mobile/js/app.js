@@ -67,6 +67,15 @@ const App = {
 
       // 日期分割缓存
       _dateCache: {},
+
+      // MOB-9: 每日回顾模式，渲染时不该污染 noteCount/hasMore 语义
+      reviewMode: false,
+      // MOB-10: refresh 并发序列号，防旧请求覆盖新请求结果
+      _refreshSeq: 0,
+      // MOB-8: in-flight 互斥标志（响应式，便于将来按钮 disabled 绑）
+      _publishLoading: false,
+      _editLoading: false,
+      _deleting: false,
     };
   },
 
@@ -204,16 +213,20 @@ const App = {
       }
     },
 
-    enterLocalMode() {
-      DB.enterLocalMode();
-      this.localMode = true;
-      this.isLoggedIn = false;
-      this.syncStatus = 'local';
-
-      this.loadPinnedTags();
-      this.refreshNotes();
-      this.refreshTags();
-      this.showToast('已进入本地模式');
+    async enterLocalMode() {
+      // MOB-4: 原实现 fire-and-forget refresh，失败时无 toast 也不清状态
+      try {
+        DB.enterLocalMode();
+        this.localMode = true;
+        this.isLoggedIn = false;
+        this.syncStatus = 'local';
+        this.loadPinnedTags();
+        await Promise.all([this.refreshNotes(), this.refreshTags()]);
+        this.showToast('已进入本地模式');
+      } catch (e) {
+        console.error('[Mobile] 进入本地模式失败:', e);
+        this.showToast('进入本地模式失败');
+      }
     },
 
     // MOB-7: 抽出 resetUserState，集中复位 Vue 状态 (与 UEU-4 思路一致)
@@ -293,10 +306,19 @@ const App = {
     // ===== 每日回顾 =====
     async dailyReview() {
       try {
+        // MOB-2 联动：取消 in-flight 搜索 debounce
+        clearTimeout(this.searchDebounceTimer);
+        this.searchDebounceTimer = null;
+
         this.currentTag = '';
         this.searchKey = '';
+        // MOB-10: 推进 seq 让任何正在飞的 refresh 结果作废
+        this._refreshSeq++;
+
         const randomNotes = await DB.getRandomNotes(10);
         this.notes = randomNotes;
+        // MOB-9: review 模式不用 noteCount 表示真实 total，置 reviewMode flag 让 UI 区分
+        this.reviewMode = true;
         this.noteCount = randomNotes.length;
         this.hasMore = false;
         this.currentPage = 1;
@@ -306,6 +328,12 @@ const App = {
         console.error('每日回顾失败:', e);
         this.showToast('回顾失败');
       }
+    },
+
+    // MOB-9: 返回全部（退出 review 模式）
+    async exitReview() {
+      this.reviewMode = false;
+      await this.refreshNotes();
     },
 
     // ===== 更多菜单 =====
@@ -327,6 +355,8 @@ const App = {
 
     // ===== 笔记操作 =====
     async refreshNotes() {
+      // MOB-10: 序列号守卫，旧 refresh 结果不能覆盖新 refresh
+      const seq = ++this._refreshSeq;
       try {
         const result = await DB.getNotes({
           tag: this.currentTag || null,
@@ -334,21 +364,31 @@ const App = {
           pageCurrent: 1,
           pageSize: this.pageSize,
         });
+        if (seq !== this._refreshSeq) return; // 已被新一轮 refresh 取代，丢弃结果
         this.notes = result.data || [];
         this.noteCount = result.total || 0;
         this.hasMore = result.hasMore || false;
         this.currentPage = 1;
         this.notesLoaded = true;
         this._dateCache = {};
+        this.reviewMode = false; // MOB-9: 离开 review
       } catch (e) {
         console.error('[Mobile] 刷新笔记失败:', e);
-        this.notesLoaded = true;
+        if (seq === this._refreshSeq) {
+          // MOB-6: 失败时清状态，避免老数据残留误导用户
+          this.notes = [];
+          this.noteCount = 0;
+          this.hasMore = false;
+          this.notesLoaded = true;
+          this.showToast('加载失败');
+        }
       }
     },
 
     async loadMore() {
       if (this.loadingMore || !this.hasMore) return;
       this.loadingMore = true;
+      const seq = this._refreshSeq; // MOB-10: 锚定本轮 refresh
       try {
         this.currentPage++;
         const result = await DB.getNotes({
@@ -357,6 +397,7 @@ const App = {
           pageCurrent: this.currentPage,
           pageSize: this.pageSize,
         });
+        if (seq !== this._refreshSeq) return; // refresh 已切换，丢弃
         this.notes = this.notes.concat(result.data || []);
         this.hasMore = result.hasMore || false;
       } catch (e) {
@@ -373,10 +414,16 @@ const App = {
         this.tags = allTags || [];
       } catch (e) {
         console.error('[Mobile] 刷新标签失败:', e);
+        // MOB-6: 失败也清，避免老 tags 与新 notes 不一致
+        this.tags = [];
       }
     },
 
     async filterByTag(tagName) {
+      // MOB-2: 切换标签必须取消 in-flight 搜索 debounce，否则搜索 debounce 触发的 refreshNotes 会回放上一刻 searchKey
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+
       this.currentTag = tagName;
       if (this.searchKey) this.searchKey = '';
       await this.refreshNotes();
@@ -391,10 +438,14 @@ const App = {
       this.searchDebounceTimer = setTimeout(() => {
         if (this.currentTag) this.currentTag = '';
         this.refreshNotes();
+        this.searchDebounceTimer = null; // MOB-2: 触发后清引用
       }, 300);
     },
 
     clearSearch() {
+      // MOB-2: 清搜索同时清 pending debounce，避免 300ms 后回放空搜索
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
       this.searchKey = '';
       this.refreshNotes();
     },
@@ -421,24 +472,21 @@ const App = {
 
     closePublishModal() { this.publishModalOpen = false; },
 
+    // MOB-1: \u76f4\u63a5\u590d\u7528 extractTags(\u5df2\u5265 URL)\uff0c\u5426\u5219 https://x.com/#frag \u4f1a\u88ab\u9ad8\u4eae\u6210 tag
     updatePublishTags() {
-      const text = this.publishInput;
-      const regex = /#([\w\u4e00-\u9fa5'-]+(?:\/[\w\u4e00-\u9fa5'-]+)*)/g;
-      const tags = [];
-      let match;
-      while ((match = regex.exec(text)) !== null) {
-        const tag = match[1];
-        if (/^[a-zA-Z]+\d+$/.test(tag)) continue;
-        if (!tags.includes(tag)) tags.push(tag);
-      }
-      this.publishTags = tags;
+      this.publishTags = this.extractTags(this.publishInput);
     },
 
     async sendFromPublish() {
+      // MOB-8: 并发互斥，防 publish 按钮连击重复入库
+      if (this._publishLoading) return;
+
       const text = this.publishInput.trim();
       if (!text && this.publishImages.length === 0) return;
 
-      const tags = this.publishTags;
+      // MOB-1 兜底: 提交前重新 extractTags，避免 publishTags 因事件时序未更新
+      const tags = this.extractTags(text);
+      this._publishLoading = true;
       let imagePaths = [];
       let imageData = [];
 
@@ -470,6 +518,8 @@ const App = {
       } catch (e) {
         console.error('发布失败:', e);
         this.showToast('发布失败');
+      } finally {
+        this._publishLoading = false; // MOB-8
       }
     },
 
@@ -532,10 +582,13 @@ const App = {
     },
 
     async deleteFromSheet() {
+      // MOB-8: 防多次触发同一删除
+      if (this._deleting) return;
       if (!this.actionNote) return;
       const note = this.actionNote;
       this.closeActionSheet();
       if (!confirm('确定删除这条笔记？')) return;
+      this._deleting = true;
       try {
         await DB.deleteNote(note.id);
         this._dateCache = {};
@@ -544,6 +597,8 @@ const App = {
       } catch (e) {
         console.error('删除失败:', e);
         this.showToast('删除失败');
+      } finally {
+        this._deleting = false;
       }
     },
 
@@ -559,8 +614,11 @@ const App = {
     },
 
     async saveEdit() {
+      // MOB-8: 防保存按钮连击
+      if (this._editLoading) return;
       if (!this.editText.trim()) { this.showToast('内容不能为空'); return; }
       const tags = this.extractTags(this.editText);
+      this._editLoading = true;
       try {
         await DB.updateNote(this.editingNote.id, { content: this.editText.trim(), tags });
         this.closeEditModal();
@@ -570,6 +628,8 @@ const App = {
       } catch (e) {
         console.error('更新失败:', e);
         this.showToast('更新失败');
+      } finally {
+        this._editLoading = false;
       }
     },
 
@@ -579,6 +639,8 @@ const App = {
     },
 
     async doDelete(note) {
+      if (this._deleting) return; // MOB-8
+      this._deleting = true;
       try {
         await DB.deleteNote(note.id);
         this._dateCache = {};
@@ -587,6 +649,8 @@ const App = {
       } catch (e) {
         console.error('删除失败:', e);
         this.showToast('删除失败');
+      } finally {
+        this._deleting = false;
       }
     },
 
