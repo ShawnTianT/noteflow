@@ -56,6 +56,7 @@ const cases = [
   { input: undefined, expect: [], desc: 'undefined -> []' },
   { input: 'single', expect: ['single'], desc: 'single tag string' },
   { input: [], expect: [], desc: 'empty array' },
+  { input: '["a","b","c"]', expect: ['a', 'b', 'c'], desc: 'JSON 字符串 → array (db.js 与 db-supabase 对齐)' },
 ];
 
 let testCount = 0;
@@ -90,6 +91,6 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log('All normalizeTags assertions passed (2 impls x 8 cases = 16 checks).');
+console.log(`All normalizeTags assertions passed (2 impls x ${cases.length} cases = ${testCount} checks).`);
 console.log('NOTE: mobile/js/app.js has no normalizeTags — CLAUDE.md description is stale (finding for Task 8/15).');
 process.exit(0);

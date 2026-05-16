@@ -386,7 +386,7 @@ const DB = (() => {
 
       // 通知 UI 自动刷新（修复首次加载时机问题：refreshNotes 早于 sync 完成时，UI 自动补一次刷新）
       window.dispatchEvent(new CustomEvent('noteflow:sync-complete', {
-        detail: { noteCount: normalizedNotes.length, tagCount: tags ? tags.length : 0 }
+        detail: { noteCount: normalizedNotes.length, tagCount: rebuiltTags.length }
       }));
     } catch (err) {
       console.warn('[sync] 从云端同步失败:', err.message);

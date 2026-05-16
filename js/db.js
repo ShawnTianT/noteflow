@@ -227,6 +227,11 @@ const DB = (() => {
   function normalizeTags(tags) {
     if (Array.isArray(tags)) return tags;
     if (typeof tags === 'string' && tags.trim()) {
+      // 先尝试 JSON.parse（兼容 db-supabase 旧导出的 JSON 字符串，与 db-supabase.normalizeTags 对齐）
+      try {
+        const parsed = JSON.parse(tags);
+        if (Array.isArray(parsed)) return parsed.map(t => String(t).trim()).filter(Boolean);
+      } catch (_) { /* fall through to comma split */ }
       return tags.split(',').map(t => t.trim()).filter(Boolean);
     }
     return [];
