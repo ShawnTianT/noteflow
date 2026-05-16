@@ -312,87 +312,111 @@ const DB = (() => {
   // 云端同步
   // ================================================
   let syncInProgress = false;
+  // SDB-8: 模块级 promise，writers 入口 await，保证不与清空+回放阶段交叠
+  let syncFromCloudPromise = null;
+  // SDB-9: 模块级最后一次 sync 错误，getSyncStatus 反映 'error' 状态
+  let lastSyncError = null;
 
   async function syncFromCloud() {
-    if (!isLoggedIn() || !supabase || syncInProgress) return;
+    if (!isLoggedIn() || !supabase) return;
+    // SDB-8: 并发调用复用同一个 promise（同时也兼容旧 syncInProgress 短路）
+    if (syncFromCloudPromise) return syncFromCloudPromise;
+    if (syncInProgress) return;
     syncInProgress = true;
-    try {
-      // 1. 从云端拉所有笔记
-      let allNotes = [];
-      let page = 0;
-      const pageSize = 200;
-      while (true) {
-        const { data, error } = await supabase
-          .from('notes')
-          .select('*')
-          .eq('user_id', currentUserId)
-          .order('created_at', { ascending: false })
-          .range(page * pageSize, (page + 1) * pageSize - 1);
-        if (error) throw error;
-        if (!data || data.length === 0) break;
-        allNotes = allNotes.concat(data);
-        if (data.length < pageSize) break;
-        page++;
+
+    syncFromCloudPromise = (async () => {
+      try {
+        // 1. 从云端拉所有笔记
+        let allNotes = [];
+        let page = 0;
+        const pageSize = 200;
+        while (true) {
+          const { data, error } = await supabase
+            .from('notes')
+            .select('*')
+            .eq('user_id', currentUserId)
+            .order('created_at', { ascending: false })
+            .range(page * pageSize, (page + 1) * pageSize - 1);
+          if (error) throw error;
+          if (!data || data.length === 0) break;
+          allNotes = allNotes.concat(data);
+          if (data.length < pageSize) break;
+          page++;
+        }
+
+        // 2. 一次性归一化
+        // P5 修复：tags 提前提取，避免 getNotes filter 热路径反复跑正则
+        // URL 修复：始终从 content 重新提取（用新 URL-aware 正则），云端老 tags 字段可能含污染数据，不可信
+        const normalizedNotes = allNotes.map(note => {
+          const tagList = note.content
+            ? extractTagsFromContent(note.content)
+            : normalizeTags(note.tags);
+          return {
+            ...note,
+            tags: tagList,
+            image_paths: normalizeToArray(note.image_paths),
+            image_data: normalizeToArray(note.image_data),
+            is_done: note.is_done === true || note.is_done === 1,
+          };
+        });
+
+        const uid = currentUserId;
+
+        // 3. 单事务：删当前用户旧 notes + 批量 put 新 notes
+        // A 修复：原子操作，UI 不会看到中间空白态
+        // B 修复：只删当前用户的，不动其他账号缓存
+        // P1 修复：批量 put 在同一事务，~10x 提速
+        await new Promise((resolve, reject) => {
+          const tx = idbDb.transaction('notes', 'readwrite');
+          const store = tx.objectStore('notes');
+          const idx = store.index('user_id');
+          const delReq = idx.openCursor(IDBKeyRange.only(uid));
+          let deletePhaseDone = false;
+          delReq.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+              cursor.delete();
+              cursor.continue();
+            } else if (!deletePhaseDone) {
+              deletePhaseDone = true;
+              for (const note of normalizedNotes) store.put(note);
+            }
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('notes sync tx aborted'));
+        });
+
+        // 4. 标签：不再拉云端 tags 表（可能含 URL 污染或孤儿）
+        //    直接基于已经清理过的本地 notes 重建 → 自动剔除 #p-1 / #wechat_redirect / 空标签
+        const rebuiltTags = await rebuildTagCounts(uid);
+
+        console.log(`[sync] 从云端同步了 ${normalizedNotes.length} 条笔记, ${rebuiltTags.length} 个标签（本地重建）`);
+
+        // SDB-9: 成功 → 清掉历史 error
+        lastSyncError = null;
+
+        // 通知 UI 自动刷新（修复首次加载时机问题：refreshNotes 早于 sync 完成时，UI 自动补一次刷新）
+        window.dispatchEvent(new CustomEvent('noteflow:sync-complete', {
+          detail: { noteCount: normalizedNotes.length, tagCount: rebuiltTags.length }
+        }));
+      } catch (err) {
+        console.warn('[sync] 从云端同步失败:', err.message);
+        // SDB-9: 记录 + 派发事件让 UI 可订阅
+        lastSyncError = { direction: 'from-cloud', message: err.message || String(err), at: Date.now() };
+        try {
+          window.dispatchEvent(new CustomEvent('noteflow:sync-error', {
+            detail: { direction: 'from-cloud', message: err.message || String(err) }
+          }));
+        } catch (_) { /* SSR/test env 无 window 时静默 */ }
+        // 不 rethrow：保持现有 signIn/online listener 的容错行为不变
+      } finally {
+        syncInProgress = false;
+        syncFromCloudPromise = null;
       }
+    })();
 
-      // 2. 一次性归一化
-      // P5 修复：tags 提前提取，避免 getNotes filter 热路径反复跑正则
-      // URL 修复：始终从 content 重新提取（用新 URL-aware 正则），云端老 tags 字段可能含污染数据，不可信
-      const normalizedNotes = allNotes.map(note => {
-        const tagList = note.content
-          ? extractTagsFromContent(note.content)
-          : normalizeTags(note.tags);
-        return {
-          ...note,
-          tags: tagList,
-          image_paths: normalizeToArray(note.image_paths),
-          image_data: normalizeToArray(note.image_data),
-          is_done: note.is_done === true || note.is_done === 1,
-        };
-      });
-
-      const uid = currentUserId;
-
-      // 3. 单事务：删当前用户旧 notes + 批量 put 新 notes
-      // A 修复：原子操作，UI 不会看到中间空白态
-      // B 修复：只删当前用户的，不动其他账号缓存
-      // P1 修复：批量 put 在同一事务，~10x 提速
-      await new Promise((resolve, reject) => {
-        const tx = idbDb.transaction('notes', 'readwrite');
-        const store = tx.objectStore('notes');
-        const idx = store.index('user_id');
-        const delReq = idx.openCursor(IDBKeyRange.only(uid));
-        let deletePhaseDone = false;
-        delReq.onsuccess = (e) => {
-          const cursor = e.target.result;
-          if (cursor) {
-            cursor.delete();
-            cursor.continue();
-          } else if (!deletePhaseDone) {
-            deletePhaseDone = true;
-            for (const note of normalizedNotes) store.put(note);
-          }
-        };
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error || new Error('notes sync tx aborted'));
-      });
-
-      // 4. 标签：不再拉云端 tags 表（可能含 URL 污染或孤儿）
-      //    直接基于已经清理过的本地 notes 重建 → 自动剔除 #p-1 / #wechat_redirect / 空标签
-      const rebuiltTags = await rebuildTagCounts(uid);
-
-      console.log(`[sync] 从云端同步了 ${normalizedNotes.length} 条笔记, ${rebuiltTags.length} 个标签（本地重建）`);
-
-      // 通知 UI 自动刷新（修复首次加载时机问题：refreshNotes 早于 sync 完成时，UI 自动补一次刷新）
-      window.dispatchEvent(new CustomEvent('noteflow:sync-complete', {
-        detail: { noteCount: normalizedNotes.length, tagCount: rebuiltTags.length }
-      }));
-    } catch (err) {
-      console.warn('[sync] 从云端同步失败:', err.message);
-    } finally {
-      syncInProgress = false;
-    }
+    return syncFromCloudPromise;
   }
 
   async function syncToCloud() {
@@ -432,6 +456,9 @@ const DB = (() => {
               .eq('id', cloudId);
             if (!error) {
               await idbDelete('sync_queue', item.localId);
+            } else {
+              // SDB-9: 之前 update 失败完全静默
+              console.warn('[sync] op failed:', item.action, error?.message);
             }
           } else if (item.action === 'delete') {
             const cloudId = idMap.get(item.localId) || item.localId;
@@ -442,6 +469,9 @@ const DB = (() => {
             if (!error) {
               await idbDelete('sync_queue', item.localId);
               idMap.delete(item.localId);
+            } else {
+              // SDB-9: 之前 delete 失败完全静默
+              console.warn('[sync] op failed:', item.action, error?.message);
             }
           } else if (item.action === 'updateTag') {
             const { data: existing } = await supabase
@@ -476,6 +506,18 @@ const DB = (() => {
           console.warn('[sync] 单条同步失败:', e.message);
         }
       }
+      // SDB-9: 整轮成功（即便单条失败已 warn）→ 清掉 lastSyncError
+      // 注：单条失败不算整体失败，因为 sync_queue 还会保留下次重试
+      // 这里只在确实抛错时才标 error
+    } catch (err) {
+      // SDB-9: syncToCloud 顶层错误派事件（之前完全没 catch）
+      console.warn('[sync] 推送到云端失败:', err.message);
+      lastSyncError = { direction: 'to-cloud', message: err.message || String(err), at: Date.now() };
+      try {
+        window.dispatchEvent(new CustomEvent('noteflow:sync-error', {
+          detail: { direction: 'to-cloud', message: err.message || String(err) }
+        }));
+      } catch (_) { /* SSR/test env 无 window */ }
     } finally {
       syncInProgress = false;
     }
@@ -492,8 +534,15 @@ const DB = (() => {
   function getSyncStatus() {
     if (isLocalMode) return 'local';
     if (syncInProgress) return 'syncing';
+    // SDB-9: 上次 sync 有错误（且 5 分钟内）→ 报 error，让 UI 提示重试
+    if (lastSyncError && (Date.now() - lastSyncError.at) < 5 * 60 * 1000) return 'error';
     if (navigator.onLine) return 'online';
     return 'offline';
+  }
+
+  // SDB-9: 给 UI 取最后一次 sync 错误的详情
+  function getLastSyncError() {
+    return lastSyncError;
   }
 
   // ================================================
@@ -558,10 +607,19 @@ const DB = (() => {
   }
 
   async function getNoteById(noteId) {
-    return await idbGet('notes', noteId);
+    const note = await idbGet('notes', noteId);
+    // SDB-3: 跨用户安全 — 拒绝读取其他用户的 note
+    const currentUid = getCurrentUserId();
+    if (note && currentUid != null && note.user_id !== currentUid) {
+      console.warn(`[security] note ${noteId} belongs to user ${note.user_id}, not current user ${currentUid}; refusing operation`);
+      return null;
+    }
+    return note;
   }
 
   async function addNote(note) {
+    // SDB-8: 等待 syncFromCloud 完成，避免清空+回放期间写入被覆盖
+    if (syncFromCloudPromise) await syncFromCloudPromise;
     const localId = makeLocalId();
     const now = new Date().toISOString();
     const uid = getCurrentUserId();
@@ -642,7 +700,9 @@ const DB = (() => {
   }
 
   // SDB-2: 批量导入维护标签计数 + 单事务写 notes/tags/sync_queue
+  // SDB-8: 等待 syncFromCloud 完成
   async function addNotesBatch(notes, options = {}) {
+    if (syncFromCloudPromise) await syncFromCloudPromise;
     const uid = getCurrentUserId();
     const now = new Date().toISOString();
 
@@ -733,20 +793,31 @@ const DB = (() => {
   }
 
   // SDB-7: 单事务包 notes + tags + sync_queue，与 addNote 对齐
+  // SDB-8: 等待 syncFromCloud 完成，避免清空+回放期间写入被覆盖
   async function updateNote(noteId, updates) {
+    if (syncFromCloudPromise) await syncFromCloudPromise;
     const uid = getCurrentUserId();
     let noteFound = false;
+    let crossUserReject = false;
 
-    await new Promise((resolve, reject) => {
-      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
-      const tx = idbDb.transaction(stores, 'readwrite');
-      const notesStore = tx.objectStore('notes');
-      const tagsStore = tx.objectStore('tags');
+    try {
+      await new Promise((resolve, reject) => {
+        const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+        const tx = idbDb.transaction(stores, 'readwrite');
+        const notesStore = tx.objectStore('notes');
+        const tagsStore = tx.objectStore('tags');
 
       const getReq = notesStore.get(noteId);
       getReq.onsuccess = () => {
         const note = getReq.result;
         if (!note) return;
+        // SDB-3: 跨用户安全 — 当前用户与 note.user_id 不匹配时 abort 整个 tx
+        if (uid != null && note.user_id !== uid) {
+          console.warn(`[security] updateNote ${noteId} belongs to user ${note.user_id}, not current user ${uid}; aborting`);
+          crossUserReject = true;
+          tx.abort();
+          return;
+        }
         noteFound = true;
 
         const oldTags = normalizeTags(note.tags);
@@ -812,31 +883,48 @@ const DB = (() => {
         }
       };
 
-      tx.oncomplete = () => {
-        if (isLoggedIn() && noteFound) syncToCloud();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error);
-    });
+        tx.oncomplete = () => {
+          if (isLoggedIn() && noteFound) syncToCloud();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('updateNote tx aborted'));
+      });
+    } catch (err) {
+      // SDB-3: tx.abort() 触发 AbortError；跨用户拒绝时静默返回 false
+      if (crossUserReject) return false;
+      throw err;
+    }
 
     return noteFound;
   }
 
   // SDB-7: 单事务包 notes + tags + sync_queue
+  // SDB-8: 等待 syncFromCloud 完成
   async function deleteNote(noteId) {
+    if (syncFromCloudPromise) await syncFromCloudPromise;
     const uid = getCurrentUserId();
     let noteFound = false;
+    let crossUserReject = false;
 
-    await new Promise((resolve, reject) => {
-      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
-      const tx = idbDb.transaction(stores, 'readwrite');
-      const notesStore = tx.objectStore('notes');
-      const tagsStore = tx.objectStore('tags');
+    try {
+      await new Promise((resolve, reject) => {
+        const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+        const tx = idbDb.transaction(stores, 'readwrite');
+        const notesStore = tx.objectStore('notes');
+        const tagsStore = tx.objectStore('tags');
 
       const getReq = notesStore.get(noteId);
       getReq.onsuccess = () => {
         const note = getReq.result;
         if (!note) return;
+        // SDB-3: 跨用户安全
+        if (uid != null && note.user_id !== uid) {
+          console.warn(`[security] deleteNote ${noteId} belongs to user ${note.user_id}, not current user ${uid}; aborting`);
+          crossUserReject = true;
+          tx.abort();
+          return;
+        }
         noteFound = true;
 
         const oldTags = normalizeTags(note.tags);
@@ -882,14 +970,19 @@ const DB = (() => {
         }
       };
 
-      tx.oncomplete = () => {
-        if (isLoggedIn() && noteFound) syncToCloud();
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error);
-    });
+        tx.oncomplete = () => {
+          if (isLoggedIn() && noteFound) syncToCloud();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('deleteNote tx aborted'));
+      });
+    } catch (err) {
+      if (crossUserReject) return false;
+      throw err;
+    }
 
-    return true;
+    return noteFound;
   }
 
   async function getNoteCount(userId) {
@@ -1097,6 +1190,7 @@ const DB = (() => {
     syncFromCloud,
     syncToCloud,
     getSyncStatus,
+    getLastSyncError,
     getAllNotesForExport,
     getAllTagsForExport,
     saveDb,
