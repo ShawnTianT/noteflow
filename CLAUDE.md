@@ -24,46 +24,53 @@
   - 直接打开：`open dist/index.html`（CDN 在线加载即可）
 - **线上地址**：https://shawntiant.github.io/noteflow/
 - **GitHub 仓库**：https://github.com/ShawnTianT/noteflow（Pages 来源：main 分支 `/docs`）
-- **最后更新**：2026-05-14
+- **最后更新**：2026-05-16
 
 ---
 
 ## 🎯 当前目标
 > 本阶段要完成的核心任务
 
-- [ ] 浏览器实测本轮修复（详见"当前进度"）
-- [ ] commit + push（待用户决定单 commit / 分 3 commit）
-- [ ] 同步 AGENTS.md
-- [x] **🔥 PC 主流程 3 个致命 bug**：首登 FAB / 本地模式 FAB / init 不幂等（2026-05-14）
-- [x] **🔥 数据安全 6 项**：A/B/C/D/E/F（2026-05-14）
-- [x] **⚡ 性能 4 项**：P1/P3/P5/P8（2026-05-14）
-- [x] **🎨 体验 1 项**：P6 Mobile 标签搜索 debounce（2026-05-14）
+- [x] **🔥 全量审查 Phase 4-7**：50+ finding 修完 high+medium，按子系统 4 commit（2026-05-16）
+- [x] **🧪 单测 harness + 4 套测试**：95 assertions + 正则一致性脚本（2026-05-16）
+- [x] **📑 审查报告 + CLAUDE.md + AGENTS.md 同步**（2026-05-16）
+- [ ] 浏览器实测（清 localStorage → 完整主流程）
+- [ ] push origin/main（用户决定时机；当前 25 commits ahead）
 
 ---
 
 ## 📍 当前进度
 > 上次工作停在哪里
 
-**做到**：本轮 13 项 bug + perf 修复全部落地（编码 + build + node 语法检查通过），未跑 e2e、未提交。改动清单见 [docs/superpowers/specs/2026-05-14-noteflow-main-flow-audit-design.md](docs/superpowers/specs/2026-05-14-noteflow-main-flow-audit-design.md)。
+**做到**：2026-05-15 全量审查走完 7 个 phase。
+- Phase 1-3：4 agent 并行扫描 → 合并 → 跨文件二次扫 → 打分（50+ finding）
+- Phase 4：按子系统 4 commit
+  - `50a9c79/e52cf95/d26a6a3/fc78f3d` SDB-1~9 + F-NT-2（数据层）
+  - `8deb38f` NF-1~7 + MOB-5（主流程）
+  - `124fca5` UEU-1~13 + MOB-7（导出/导入/图片）
+  - `951a94a` MOB-1/2/4/6/8/9/10（Mobile）
+- Phase 5：4 套单测（95 assertions）+ regex-sync 脚本
+- Phase 6：syntax + tests + regex + build 全过
+- Phase 7：本次更新 + [审查报告](docs/superpowers/specs/2026-05-15-noteflow-full-audit-report.md)
 
-**改动文件**：
-- `js/app.js` — doSignIn / enterLocalMode 加 init
-- `js/modules/editor.js` — init 幂等
-- `js/modules/search.js` — init 幂等
-- `js/modules/tags.js` — buildTagTree 缓存（P3）
-- `js/db-supabase.js` — Phase 1 全部 + P5 + P8（**核心改动**）
-- `mobile/js/app.js` — tagSearchKey debounce（P6）
+**改动文件（本轮汇总）**：
+- 数据层：`js/db.js` / `js/db-supabase.js`
+- 主流程：`js/modules/editor.js` / `timeline.js` / `tags.js` / `search.js`
+- 导出工具：`js/utils/imageHelper.js` / `flomoImport.js` / `zipHelper.js` / `js/modules/export.js`
+- UI：`js/app.js` / `index.html`（导入下拉）
+- Mobile：`mobile/js/app.js` / `mobile/index.html`（回顾返回条）
+- 测试：`tests/run-all.cjs` / `tests/check-regex-sync.cjs` / `tests/unit/*.test.cjs`
+- 文档：`docs/superpowers/specs/2026-05-15-*.md`
 - dist/ + docs/ 已同步
 
 **下一步**：
-1. 浏览器手动测主流程（清 localStorage → 登录 → 发布带标签 → 切标签 → 搜索 → 退出登录 → 重登 → 暂不登录测本地模式 → 刷新页面验证 localMode 持久化）
-2. 选 commit 策略并 push（3 选项见聊天记录最后一条）
-3. 同步 AGENTS.md 到 v1.3.2
+1. **浏览器实测**（用户主导）：清 localStorage → 登录 → 发布带标签/图 → 切标签 → 搜索 → 编辑 → 删除 → 退出登录 → 重登 → 暂不登录测本地模式 → 刷新页面验证 localMode 持久化 → 测 mobile（窄屏跳转 + 回顾返回）
+2. **push origin/main**（用户决定时机；25 commits ahead）
+3. Low findings 收尾（详见 audit-report 第 4 节）
 
 **遗留问题**：
-- 未跑 e2e（用户多次拒绝起 HTTP server）
-- AGENTS.md 仍落后
-- 工作区有多处未提交改动
+- 未跑浏览器 e2e（仅 node 层 syntax + 单测覆盖）
+- AGENTS.md 仍可能落后（本轮已对齐 v1.3.2，但代码量大）
 
 ---
 
@@ -197,6 +204,17 @@ Vue 响应式只管 Vue 模板内的 DOM。`#notes-container` 和 `#tags-list` �
 | **E: 标签计数读改写竞争** | 无事务保护，并发 update 会丢更新 | ✅ |
 | **F: signOut 不清缓存** | 退出后老用户笔记残留 IDB，换账号会串数据 | ✅ |
 
+### 全量审查 high/medium（2026-05-16 已全修，4 PR）
+
+| Finding 组 | 子系统 | Commit | 备注 |
+|---|---|---|---|
+| **SDB-1~9 + F-NT-2** | 数据层 | `50a9c79/e52cf95/d26a6a3/fc78f3d` | 同步 typo / 原子事务 / 跨用户隔离 / 接口对齐 |
+| **NF-1~7 + MOB-5** | 主流程 | `8deb38f` | IME / 时区 / 并发 / 缓存签名 / pinned key |
+| **UEU-1~13 + MOB-7** | 导出/导入/图片 | `124fca5` | fire-and-forget / 死链 / OOM / XSS / 状态清理 |
+| **MOB-1/2/4/6/8/9/10** | Mobile | `951a94a` | URL 剥离 / debounce / 状态清 / 互斥 / reviewMode / seq |
+
+完整对照表见 [审查报告](docs/superpowers/specs/2026-05-15-noteflow-full-audit-report.md) 第 2 节。Low 仅报告见第 4 节。
+
 ### 老 bug（v1.3.2 已修）
 
 | Bug | 原因 | 状态 |
@@ -206,7 +224,7 @@ Vue 响应式只管 Vue 模板内的 DOM。`#notes-container` 和 `#tags-list` �
 | 手机端 JS 404 | `build.sh` sed 错误替换 | ✅ v1.3.2 |
 | `#复盘-周/小确幸` 被截断 | 正则 `\w` 不含 `-` | ✅ v1.3.2 |
 | `#campaign2` 误判 | `/^[a-zA-Z]+\d+$/` 过滤 | ✅ |
-| AGENTS.md 脱节 | 版本号/正则示例/文件列表均落后 | 🔴 未修复 |
+| AGENTS.md 脱节 | 版本号/正则示例/文件列表均落后 | 🟢 2026-05-16 同步 |
 
 ---
 
@@ -214,6 +232,9 @@ Vue 响应式只管 Vue 模板内的 DOM。`#notes-container` 和 `#tags-list` �
 
 | 日期 | 决策 | 原因 |
 |---|---|---|
+| 2026-05-16 | **零依赖 node 单测 harness**（`tests/run-all.cjs` + `tests/unit/*.test.cjs`） | 不引入 jest/vitest 保持零构建；单测仅覆盖纯逻辑模块（extractTags/normalizeTags/buildTagTree/highlightTags），不跑 DOM；用大括号配对 / new Function 抠 IIFE 内部函数 |
+| 2026-05-16 | **正则一致性强制脚本**（`tests/check-regex-sync.cjs`） | 标签正则散落 4 处文件极易漂移；脚本字面量提取 + 字符串比对，不一致即 exit 1 |
+| 2026-05-16 | **审查 4 PR 拆分**（数据层 / 主流程 / 导出 / Mobile） | 单 PR 把 50+ finding 一勺烩会让 review 失控；按子系统分让回归定位精确 |
 | 2026-05-14 | `Editor.init` / `SearchModule.init` 改为**幂等**（element 用 `_editorBound`/`_searchBound` 标记，document listener 用 `globalListenersAttached` 全局开关） | 修 PC 主流程后 sign-in→sign-out→sign-in 会导致 paste/keydown listener 累积，**必须**幂等否则一次粘贴触发多次 |
 | 2026-05-14 | `doSignIn` 在 `await $nextTick()` 后再调 init | Vue 异步渲染 v-else 主界面，必须等 DOM 出来才能 `getElementById('fab-publish')` |
 | 2026-05-14 | `enterLocalMode` 用 `$nextTick(async fn)` 包整段 refresh + init | 同上，且原代码同步调 init 是确认的 BUG #2 |
@@ -236,6 +257,9 @@ Vue 响应式只管 Vue 模板内的 DOM。`#notes-container` 和 `#tags-list` �
 6. **AGENTS.md 与代码不同步** — 改完代码记得改 AGENTS.md，否则下次 agent 用错信息
 7. **PC 端 `Editor.init` / `SearchModule.init` 必须在 Vue 渲染主界面后才调**（v-else 异步），否则 `getElementById` 全 null。Mobile 用 `@click` 模板绑定，无此问题
 8. **PC 端 init 必须幂等** — sign-in→out→in 会反复调 init，document 上的 paste/keydown 不能重复绑定（用模块级 `globalListenersAttached` 守门）
+9. **改了标签正则要跑 `node tests/check-regex-sync.cjs`** — 4 处必须字面量完全一致，脚本会比对 `js/modules/editor.js` / `timeline.js` / `js/db-supabase.js` / `mobile/js/app.js`
+10. **改完代码必跑 `node tests/run-all.cjs`** — 4 套单测 95 assertions，含 NF-6/extractTags/normalizeTags 等回归保护
+11. **doSignOut 必须显式清 Vue 状态 + 手动 renderNotes([])/renderTags([])**（UEU-4/MOB-7）— 否则换账号串数据；`resetUserState()` 已抽出（mobile）；PC 直接在 doSignOut 内显式清
 
 ---
 
@@ -248,4 +272,4 @@ Vue 响应式只管 Vue 模板内的 DOM。`#notes-container` 和 `#tags-list` �
 
 ---
 
-*最后更新：2026-05-14*
+*最后更新：2026-05-16*
