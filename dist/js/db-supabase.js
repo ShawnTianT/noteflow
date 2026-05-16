@@ -641,102 +641,253 @@ const DB = (() => {
     return newNote;
   }
 
+  // SDB-2: 批量导入维护标签计数 + 单事务写 notes/tags/sync_queue
   async function addNotesBatch(notes, options = {}) {
     const uid = getCurrentUserId();
     const now = new Date().toISOString();
-    const results = [];
 
-    for (let i = 0; i < notes.length; i++) {
-      const note = notes[i];
-      const localId = makeLocalId();
+    // 1. 预先构造所有新笔记
+    const newNotes = notes.map(note => ({
+      id: makeLocalId(),
+      user_id: uid,
+      content: note.content || '',
+      tags: note.tags || [],
+      image_paths: note.image_paths || [],
+      image_data: note.image_data || [],
+      type: note.type || 'text',
+      is_done: note.is_done || false,
+      created_at: note.created_at || note.createdAt || now,
+      updated_at: note.updated_at || note.updatedAt || now,
+    }));
 
-      const newNote = {
-        id: localId,
-        user_id: uid,
-        content: note.content || '',
-        tags: note.tags || [],
-        image_paths: note.image_paths || [],
-        image_data: note.image_data || [],
-        type: note.type || 'text',
-        is_done: note.is_done || false,
-        created_at: note.created_at || note.createdAt || now,
-        updated_at: note.updated_at || note.updatedAt || now,
-      };
-
-      await idbPut('notes', newNote);
-      results.push(newNote);
-
-      if (isLoggedIn()) {
-        await idbPut('sync_queue', {
-          localId,
-          action: 'insert',
-          data: { ...newNote },
-        });
+    // 2. 累积所有 tag delta
+    const tagDelta = new Map();
+    for (const n of newNotes) {
+      for (const t of normalizeTags(n.tags)) {
+        tagDelta.set(t, (tagDelta.get(t) || 0) + 1);
       }
     }
+
+    // 3. 单事务写所有 notes + tags + sync_queue
+    await new Promise((resolve, reject) => {
+      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+      const tx = idbDb.transaction(stores, 'readwrite');
+      const notesStore = tx.objectStore('notes');
+      const tagsStore = tx.objectStore('tags');
+
+      for (const note of newNotes) notesStore.put(note);
+
+      if (tagDelta.size > 0) {
+        const tagReq = uid
+          ? tagsStore.index('user_id').getAll(IDBKeyRange.only(uid))
+          : tagsStore.getAll();
+        tagReq.onsuccess = () => {
+          const existing = tagReq.result || [];
+          const tagMap = new Map(existing.map(t => [t.name, t]));
+          for (const [name, delta] of tagDelta) {
+            let tag = tagMap.get(name);
+            if (!tag) {
+              tag = { id: makeLocalId(), user_id: uid, name, count: 0 };
+              tagMap.set(name, tag);
+            }
+            tag.count = (tag.count || 0) + delta;
+            tagsStore.put(tag);
+            if (isLoggedIn()) {
+              tx.objectStore('sync_queue').put({
+                localId: 'tag_' + name,
+                action: 'updateTag',
+                tagName: name,
+                count: tag.count,
+              });
+            }
+          }
+          if (isLoggedIn()) {
+            for (const note of newNotes) {
+              tx.objectStore('sync_queue').put({
+                localId: note.id,
+                action: 'insert',
+                data: { ...note },
+              });
+            }
+          }
+        };
+      } else if (isLoggedIn()) {
+        for (const note of newNotes) {
+          tx.objectStore('sync_queue').put({
+            localId: note.id,
+            action: 'insert',
+            data: { ...note },
+          });
+        }
+      }
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
 
     if (isLoggedIn() && !options.skipSave) {
       syncToCloud();
     }
 
-    return results;
+    return newNotes;
   }
 
+  // SDB-7: 单事务包 notes + tags + sync_queue，与 addNote 对齐
   async function updateNote(noteId, updates) {
-    const note = await idbGet('notes', noteId);
-    if (!note) return false;
+    const uid = getCurrentUserId();
+    let noteFound = false;
 
-    // 更新标签计数：旧标签 -1
-    const oldTags = normalizeTags(note.tags);
-    for (const tag of oldTags) {
-      await updateTagCount(tag, -1);
-    }
+    await new Promise((resolve, reject) => {
+      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+      const tx = idbDb.transaction(stores, 'readwrite');
+      const notesStore = tx.objectStore('notes');
+      const tagsStore = tx.objectStore('tags');
 
-    const updated = {
-      ...note,
-      ...updates,
-      updated_at: new Date().toISOString(),
-    };
-    await idbPut('notes', updated);
+      const getReq = notesStore.get(noteId);
+      getReq.onsuccess = () => {
+        const note = getReq.result;
+        if (!note) return;
+        noteFound = true;
 
-    // 更新标签计数：新标签 +1
-    const newTags = normalizeTags(updated.tags);
-    for (const tag of newTags) {
-      await updateTagCount(tag, 1);
-    }
+        const oldTags = normalizeTags(note.tags);
+        const updated = {
+          ...note,
+          ...updates,
+          updated_at: new Date().toISOString(),
+        };
+        const newTags = normalizeTags(updated.tags);
 
-    if (isLoggedIn()) {
-      await idbPut('sync_queue', {
-        localId: noteId,
-        action: 'update',
-        data: { ...updated },
-      });
-      syncToCloud();
-    }
+        // 计算 tag delta：oldTags -1, newTags +1（互相抵消的部分 delta=0）
+        const tagDelta = new Map();
+        for (const t of oldTags) tagDelta.set(t, (tagDelta.get(t) || 0) - 1);
+        for (const t of newTags) tagDelta.set(t, (tagDelta.get(t) || 0) + 1);
 
-    return true;
+        notesStore.put(updated);
+
+        const hasTagChange = Array.from(tagDelta.values()).some(d => d !== 0);
+        if (hasTagChange) {
+          const tagReq = uid
+            ? tagsStore.index('user_id').getAll(IDBKeyRange.only(uid))
+            : tagsStore.getAll();
+          tagReq.onsuccess = () => {
+            const existing = tagReq.result || [];
+            const tagMap = new Map(existing.map(t => [t.name, t]));
+            for (const [name, delta] of tagDelta) {
+              if (delta === 0) continue;
+              let tag = tagMap.get(name);
+              if (!tag) {
+                if (delta <= 0) continue; // 新标签且 delta 非正：跳过
+                tag = { id: makeLocalId(), user_id: uid, name, count: 0 };
+                tagMap.set(name, tag);
+              }
+              tag.count = Math.max(0, (tag.count || 0) + delta);
+              if (tag.count === 0 && tag.id != null) {
+                tagsStore.delete(tag.id);
+              } else {
+                tagsStore.put(tag);
+              }
+              if (isLoggedIn()) {
+                tx.objectStore('sync_queue').put({
+                  localId: 'tag_' + name,
+                  action: 'updateTag',
+                  tagName: name,
+                  count: tag.count,
+                });
+              }
+            }
+            if (isLoggedIn()) {
+              tx.objectStore('sync_queue').put({
+                localId: noteId,
+                action: 'update',
+                data: { ...updated },
+              });
+            }
+          };
+        } else if (isLoggedIn()) {
+          tx.objectStore('sync_queue').put({
+            localId: noteId,
+            action: 'update',
+            data: { ...updated },
+          });
+        }
+      };
+
+      tx.oncomplete = () => {
+        if (isLoggedIn() && noteFound) syncToCloud();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+
+    return noteFound;
   }
 
+  // SDB-7: 单事务包 notes + tags + sync_queue
   async function deleteNote(noteId) {
-    const note = await idbGet('notes', noteId);
+    const uid = getCurrentUserId();
+    let noteFound = false;
 
-    // 更新标签计数
-    if (note) {
-      const tags = normalizeTags(note.tags);
-      for (const tag of tags) {
-        await updateTagCount(tag, -1);
-      }
-    }
+    await new Promise((resolve, reject) => {
+      const stores = isLoggedIn() ? ['notes', 'tags', 'sync_queue'] : ['notes', 'tags'];
+      const tx = idbDb.transaction(stores, 'readwrite');
+      const notesStore = tx.objectStore('notes');
+      const tagsStore = tx.objectStore('tags');
 
-    await idbDelete('notes', noteId);
+      const getReq = notesStore.get(noteId);
+      getReq.onsuccess = () => {
+        const note = getReq.result;
+        if (!note) return;
+        noteFound = true;
 
-    if (isLoggedIn()) {
-      await idbPut('sync_queue', {
-        localId: noteId,
-        action: 'delete',
-      });
-      syncToCloud();
-    }
+        const oldTags = normalizeTags(note.tags);
+        notesStore.delete(noteId);
+
+        if (oldTags.length > 0) {
+          const tagReq = uid
+            ? tagsStore.index('user_id').getAll(IDBKeyRange.only(uid))
+            : tagsStore.getAll();
+          tagReq.onsuccess = () => {
+            const existing = tagReq.result || [];
+            const tagMap = new Map(existing.map(t => [t.name, t]));
+            for (const name of oldTags) {
+              const tag = tagMap.get(name);
+              if (!tag) continue;
+              tag.count = Math.max(0, (tag.count || 0) - 1);
+              if (tag.count === 0 && tag.id != null) {
+                tagsStore.delete(tag.id);
+              } else {
+                tagsStore.put(tag);
+              }
+              if (isLoggedIn()) {
+                tx.objectStore('sync_queue').put({
+                  localId: 'tag_' + name,
+                  action: 'updateTag',
+                  tagName: name,
+                  count: tag.count,
+                });
+              }
+            }
+            if (isLoggedIn()) {
+              tx.objectStore('sync_queue').put({
+                localId: noteId,
+                action: 'delete',
+              });
+            }
+          };
+        } else if (isLoggedIn()) {
+          tx.objectStore('sync_queue').put({
+            localId: noteId,
+            action: 'delete',
+          });
+        }
+      };
+
+      tx.oncomplete = () => {
+        if (isLoggedIn() && noteFound) syncToCloud();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
 
     return true;
   }

@@ -15,6 +15,23 @@ const DB = (() => {
   const AUTO_SAVE_INTERVAL = 30000; // 30秒自动保存
   let autoSaveTimer = null;
   let dirty = false; // 脏标记，减少无意义保存
+  let dirtyVersion = 0;     // 单调递增版本号，每次 markDirty 自增
+  let lastSavedVersion = 0; // 最近一次成功持久化的版本号
+
+  // SQLite 事务封装：保证 BEGIN..COMMIT/ROLLBACK 原子性
+  // sql.js 同步执行，fn 必须是同步函数（不要 await）
+  function withTransaction(fn) {
+    if (!db) throw new Error('db not initialized');
+    db.run('BEGIN');
+    try {
+      const result = fn();
+      db.run('COMMIT');
+      return result;
+    } catch (e) {
+      try { db.run('ROLLBACK'); } catch (_) {}
+      throw e;
+    }
+  }
 
   // ==================== IndexedDB 工具 ====================
 
@@ -262,30 +279,36 @@ const DB = (() => {
    * 添加笔记
    * @param {Object} options - tags 接受数组或逗号字符串
    */
-  function addNote({ content, tags = [], imagePaths = '', imageData = '', createdAt = null, updatedAt = null, type = 'note', isDone = 0, skipSave = false }) {
+  async function addNote({ content, tags = [], imagePaths = '', imageData = '', createdAt = null, updatedAt = null, type = 'note', isDone = 0, skipSave = false }) {
     const userId = getCurrentUserId();
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     const ca = createdAt || now;
     const ua = updatedAt || now;
     const tagsStr = tagsToString(tags);
-    db.run(
-      "INSERT INTO notes (user_id, content, tags, image_paths, image_data, type, is_done, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [userId, content, tagsStr, imagePaths, imageData, type, isDone, ca, ua]
-    );
 
-    // 更新标签
-    normalizeTags(tags).forEach(tag => {
-      updateTagCount(tag, 1);
+    // SDB-6: 单事务包 INSERT + 标签计数更新
+    const newId = withTransaction(() => {
+      db.run(
+        "INSERT INTO notes (user_id, content, tags, image_paths, image_data, type, is_done, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [userId, content, tagsStr, imagePaths, imageData, type, isDone, ca, ua]
+      );
+
+      // 更新标签（已在事务内，updateTagCount 自带事务时是 no-op 嵌套？此处 updateTagCount 自包事务，
+      // 但 sql.js BEGIN 嵌套会报错。为避免嵌套事务，这里直接走内联标签更新。）
+      normalizeTags(tags).forEach(tag => {
+        updateTagCountInline(tag, 1);
+      });
+
+      return db.exec("SELECT last_insert_rowid()")[0].values[0][0];
     });
 
+    markDirty();
     if (!skipSave) {
-      markDirty();
-      saveDb();
-    } else {
-      markDirty();
+      // SDB-5: 等待并向上传播保存错误
+      await saveDb();
     }
 
-    return db.exec("SELECT last_insert_rowid()")[0].values[0][0];
+    return newId;
   }
 
   /**
@@ -293,12 +316,12 @@ const DB = (() => {
    * @param {Array} notes - [{content, tags, createdAt, updatedAt}]
    * @returns {number} 成功导入数
    */
-  function addNotesBatch(notes) {
+  async function addNotesBatch(notes) {
     let imported = 0;
     for (const note of notes) {
       if (!note.content || note.content.length < 1) continue;
       try {
-        addNote({
+        await addNote({
           content: note.content,
           tags: note.tags || [],  // 接受数组格式
           imagePaths: note.imagePaths || '',
@@ -315,7 +338,7 @@ const DB = (() => {
     // 批量结束后统一保存
     if (imported > 0) {
       markDirty();
-      saveDb();
+      await saveDb();
     }
     return imported;
   }
@@ -443,53 +466,60 @@ const DB = (() => {
 
   /**
    * 更新笔记（tags 接受数组或逗号字符串）
+   * SDB-5/SDB-6: async + 单事务 + 错误传播
    */
   async function updateNote(id, { content, tags = [], imagePaths = '', imageData = '' }) {
     const tagsArr = normalizeTags(tags);
     const tagsStr = tagsToString(tags);
 
-    const oldNote = getNoteByIdSync(id);
-    if (oldNote) {
-      normalizeTags(oldNote.tags).forEach(tag => {
-        updateTagCount(tag, -1);
+    withTransaction(() => {
+      const oldNote = getNoteByIdSync(id);
+      if (oldNote) {
+        normalizeTags(oldNote.tags).forEach(tag => {
+          updateTagCountInline(tag, -1);
+        });
+      }
+
+      db.run(
+        "UPDATE notes SET content = ?, tags = ?, image_paths = ?, image_data = ?, updated_at = datetime('now','localtime') WHERE id = ?",
+        [content, tagsStr, imagePaths, imageData, id]
+      );
+
+      tagsArr.forEach(tag => {
+        updateTagCountInline(tag, 1);
       });
-    }
-
-    db.run(
-      "UPDATE notes SET content = ?, tags = ?, image_paths = ?, image_data = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-      [content, tagsStr, imagePaths, imageData, id]
-    );
-
-    tagsArr.forEach(tag => {
-      updateTagCount(tag, 1);
     });
 
     markDirty();
-    saveDb();
+    await saveDb();
   }
 
   /**
    * 删除笔记
+   * SDB-5/SDB-6: async + 单事务 + 错误传播
    */
   async function deleteNote(id) {
-    const note = getNoteByIdSync(id);
-    if (note) {
-      normalizeTags(note.tags).forEach(tag => {
-        updateTagCount(tag, -1);
-      });
-    }
+    withTransaction(() => {
+      const note = getNoteByIdSync(id);
+      if (note) {
+        normalizeTags(note.tags).forEach(tag => {
+          updateTagCountInline(tag, -1);
+        });
+      }
 
-    db.run("DELETE FROM notes WHERE id = ?", [id]);
+      db.run("DELETE FROM notes WHERE id = ?", [id]);
+    });
+
     markDirty();
-    saveDb();
+    await saveDb();
   }
 
   // ==================== 标签操作 ====================
 
   /**
-   * 更新标签计数（修复：用 prepare+bind 替代 db.exec 的参数绑定）
+   * 内部使用：更新标签计数的纯 SQL 操作（不开事务，供已在事务内的代码调用）
    */
-  function updateTagCount(tagName, delta) {
+  function updateTagCountInline(tagName, delta) {
     const userId = getCurrentUserId();
 
     // 用 prepare 查询
@@ -515,6 +545,14 @@ const DB = (() => {
     } else if (delta > 0) {
       db.run("INSERT INTO tags (user_id, name, count) VALUES (?, ?, ?)", [userId, tagName, delta]);
     }
+  }
+
+  /**
+   * 更新标签计数（公共 API：单独调用时自带事务原子性）
+   * SDB-6: 用 withTransaction 包住读改写，避免并发场景下计数丢失
+   */
+  function updateTagCount(tagName, delta) {
+    return withTransaction(() => updateTagCountInline(tagName, delta));
   }
 
   /**
@@ -552,24 +590,32 @@ const DB = (() => {
 
   // ==================== 数据库持久化 ====================
 
+  // SDB-5: dirtyVersion 单调递增，防止 saveDb 期间并发 markDirty 被覆盖丢失
   function markDirty() {
     dirty = true;
+    dirtyVersion++;
   }
 
   /**
    * 保存数据库到 IndexedDB
+   * SDB-5: 失败时抛错向上传播，便于调用方 toast；并发 markDirty 不会被错误清掉 dirty 标志
    */
   async function saveDb() {
-    if (!dirty) return true;
+    if (!dirty || !db) return true;
+    const myVersion = dirtyVersion;
     try {
       const userId = getCurrentUserId();
       const data = db.export();
       await idbSet('user_' + userId, data);
-      dirty = false;
+      // 仅当本次保存期间无新增 markDirty 才清 dirty 标志
+      if (myVersion === dirtyVersion) {
+        dirty = false;
+      }
+      lastSavedVersion = myVersion;
       return true;
     } catch (e) {
       console.error('数据库保存失败:', e);
-      return false;
+      throw e; // 向上传播，调用方决定 toast / 重试
     }
   }
 
@@ -591,7 +637,7 @@ const DB = (() => {
   function startAutoSave() {
     if (autoSaveTimer) clearInterval(autoSaveTimer);
     autoSaveTimer = setInterval(() => {
-      if (dirty) saveDb();
+      if (dirty) saveDb().catch(e => console.error('[db] auto save failed:', e));
     }, AUTO_SAVE_INTERVAL);
   }
 
