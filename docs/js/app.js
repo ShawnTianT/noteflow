@@ -16,6 +16,7 @@ const app = {
       searchKey: '',
       noteCount: 0,
       showExportMenu: false,
+      showImportMenu: false, // UEU-10: 导入下拉
 
       // Supabase 登录相关
       isLoggedIn: false,
@@ -163,6 +164,20 @@ const app = {
       this.userUsername = '';
       this.currentUserId = null;
 
+      // UEU-4: 显式清 Vue 状态 + 强制清渲染层，避免老用户笔记/标签残留串到下一登录
+      this.notes = [];
+      this.tags = [];
+      this.noteCount = 0;
+      this.hasMoreNotes = false;
+      this.currentTag = '';
+      this.searchKey = '';
+      this.currentPage = 1;
+      this.notesLoaded = false;
+      // Timeline / TagsModule 是手动渲染，必须显式重画
+      Timeline.renderNotes([]);
+      TagsModule.renderTags([], '');
+      SearchModule.clearSearch();
+
       Editor.showToast('已退出登录');
     },
 
@@ -287,30 +302,46 @@ const app = {
       return '本地用户';
     },
 
-    // ======== 导入导出 ========
+    // ======== 导入导出（UEU-12: try/catch + toast 兜底，防 unhandled rejection） ========
 
     async exportJSON() {
-      ExportModule.exportJSON();
       this.showExportMenu = false;
+      try { await ExportModule.exportJSON(); }
+      catch (e) { console.error('导出 JSON 失败:', e); Editor.showToast('导出失败：' + (e?.message || e), 'error'); }
     },
 
     async exportFlomo() {
-      ExportModule.exportFlomo();
       this.showExportMenu = false;
+      try { await ExportModule.exportFlomo(); }
+      catch (e) { console.error('导出 flomo 失败:', e); Editor.showToast('导出失败：' + (e?.message || e), 'error'); }
     },
 
-    importFlomo() {
-      ExportModule.importFlomo();
+    async importJSON() {
       this.showExportMenu = false;
+      try { await ExportModule.importJSON(); }
+      catch (e) { console.error('导入 JSON 失败:', e); Editor.showToast('导入失败：' + (e?.message || e), 'error'); }
+    },
+
+    async importFlomo() {
+      this.showExportMenu = false;
+      try { await ExportModule.importFlomo(); }
+      catch (e) { console.error('导入 flomo 失败:', e); Editor.showToast('导入失败：' + (e?.message || e), 'error'); }
     },
 
     toggleExportMenu() {
       this.showExportMenu = !this.showExportMenu;
+      this.showImportMenu = false; // 互斥
+    },
+
+    toggleImportMenu() {
+      this.showImportMenu = !this.showImportMenu;
+      this.showExportMenu = false; // 互斥
     },
 
     closeExportMenu(e) {
       if (!e.target.closest('.export-menu-wrapper')) {
         this.showExportMenu = false;
+        this.showImportMenu = false;
       }
     }
   }

@@ -30,12 +30,19 @@ const FlomoImport = (() => {
         content = cleanContent(contentEl.innerHTML);
       }
 
-      // 图片（MVP阶段跳过，只记录路径）
-      const images = [];
-      const imgElements = memo.querySelectorAll('.files img');
+      // UEU-3: 图片 — 多 selector 兼容 (.files img / .file img / 裸 img)
+      //   src 可能是 data:base64 → 拆到 image_data；或相对路径 → 拆到 image_paths
+      const imageData = [];
+      const imagePaths = [];
+      const seenSrc = new Set();
+      const imgElements = memo.querySelectorAll('.files img, .file img, img[src], img[data-src]');
       imgElements.forEach(img => {
         const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-        if (src) images.push(src);
+        if (!src || seenSrc.has(src)) return;
+        seenSrc.add(src);
+        const m = src.match(/^data:image\/[^;]+;base64,(.+)$/);
+        if (m) imageData.push(m[1]);
+        else imagePaths.push(src);
       });
 
       // 提取标签
@@ -46,7 +53,8 @@ const FlomoImport = (() => {
           content,
           tags: tags, // 数组格式
           createdAt,
-          images
+          image_paths: imagePaths,
+          image_data: imageData
         });
       }
     });
@@ -93,39 +101,55 @@ const FlomoImport = (() => {
    * @param {Function} onProgress - 进度回调 (current, total, message)
    * @returns {Promise<{imported: number, skipped: number, dbSizeKB: number}>}
    */
+  /**
+   * UEU-6: 去重 key — 用完整 created_at + content（原 (date.slice(0,10) + 50 字符) 会让长内容
+   * 头部相同的笔记被误判为重复）
+   */
+  function dedupKey(createdAt, content) {
+    return (createdAt || '') + '|' + (content || '');
+  }
+
   async function importToDB(htmlText, onProgress) {
     const memos = parseHTML(htmlText);
     if (onProgress) onProgress(0, memos.length, '解析完成，开始导入...');
 
-    // 去重：查出所有已有笔记
-    const existingResult = await DB.getNotes({ pageSize: 999999 });
-    const existingNotes = existingResult.data || [];
+    // UEU-5: 流式分页拉已有笔记构建去重 Set，避免 pageSize: 999999 OOM
+    //   500/页拉取，只保留 dedup key 不留 note 完整对象；万级笔记内存可控
     const existSet = new Set();
-    existingNotes.forEach(n => {
-      if (n.created_at && n.content) {
-        existSet.add(n.created_at.slice(0, 10) + '|' + n.content.slice(0, 50));
+    const PAGE = 500;
+    let pageCurrent = 1;
+    while (true) {
+      const res = await DB.getNotes({ pageSize: PAGE, pageCurrent });
+      const rows = res?.data || [];
+      for (const n of rows) {
+        if (n.created_at && n.content) existSet.add(dedupKey(n.created_at, n.content));
       }
-    });
+      if (!res?.hasMore || rows.length === 0) break;
+      pageCurrent++;
+      if (pageCurrent > 200) break; // 安全上限 10w 条
+    }
 
     // 过滤重复
     const newMemos = memos.filter(m => {
       if (!m.content) return false;
-      const key = (m.createdAt ? m.createdAt.slice(0, 10) : '') + '|' + m.content.slice(0, 50);
-      return !existSet.has(key);
+      return !existSet.has(dedupKey(m.createdAt, m.content));
     });
+    const skipped = memos.length - newMemos.length;
 
-    if (onProgress) onProgress(0, memos.length, `去重后 ${newMemos.length} 条待导入`);
+    if (onProgress) onProgress(0, memos.length, `去重后 ${newMemos.length} 条待导入（跳过 ${skipped} 重复）`);
 
-    // 批量导入
+    // 批量导入（UEU-3: 带上 image_paths / image_data）
     const result = await DB.addNotesBatch(newMemos.map(m => ({
       content: m.content,
       tags: m.tags || [], // 数组格式
+      image_paths: m.image_paths || [],
+      image_data: m.image_data || [],
       created_at: m.createdAt || null,
       updated_at: m.createdAt || null
     })));
 
-    const imported = result ? result.length : 0;
-    return { imported, skipped: memos.length - imported, dbSizeKB: 0 };
+    const imported = Array.isArray(result) ? result.length : (result?.imported ?? newMemos.length);
+    return { imported, skipped, dbSizeKB: 0 };
   }
 
   /**

@@ -7,6 +7,7 @@ const ExportModule = (() => {
 
   /**
    * 导出为 JSON
+   * UEU-10: 取消 pretty-print，万级笔记 stringify 2 空格缩进会让 JSON 体积膨胀 ~30%
    */
   async function exportJSON() {
     const notes = await DB.getAllNotesForExport();
@@ -24,10 +25,51 @@ const ExportModule = (() => {
       tags
     };
 
-    const json = JSON.stringify(exportData, null, 2);
+    const json = JSON.stringify(exportData); // UEU-10: 取消缩进
     const dateStr = new Date().toISOString().slice(0, 10);
     ZipHelper.downloadText(json, `noteflow_${dateStr}.json`, 'application/json');
     Editor.showToast('JSON 已导出');
+  }
+
+  /**
+   * 从 JSON 导入（UEU-10: 补充导入入口；现阶段仅 dry-run 校验 + 批量 addNotesBatch）
+   */
+  async function importJSON() {
+    try {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      const file = await new Promise((resolve, reject) => {
+        input.onchange = (e) => {
+          const f = e.target.files?.[0];
+          if (!f) return reject(new Error('未选择文件'));
+          resolve(f);
+        };
+        input.click();
+      });
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data || !Array.isArray(data.notes)) {
+        throw new Error('JSON 格式不正确：缺少 notes 数组');
+      }
+      const payload = data.notes.map(n => ({
+        content: String(n.content || ''),
+        tags: Array.isArray(n.tags) ? n.tags : [],
+        image_paths: Array.isArray(n.image_paths) ? n.image_paths : [],
+        image_data: Array.isArray(n.image_data) ? n.image_data : [],
+        created_at: n.created_at || new Date().toISOString()
+      }));
+      const result = await DB.addNotesBatch(payload, { skipSave: false });
+      const imported = result?.imported ?? payload.length;
+      Editor.showToast(`已导入 ${imported} 条笔记`);
+      if (window.app) {
+        await window.app.refreshNotes();
+        await window.app.refreshTags();
+      }
+    } catch (e) {
+      console.error('导入 JSON 失败:', e);
+      Editor.showToast('导入失败：' + (e?.message || e), 'error');
+    }
   }
 
   /**
@@ -47,17 +89,21 @@ const ExportModule = (() => {
     let html = generateFlomoHTML(notes);
     files.push({ path: 'notes.html', content: html });
 
-    // 收集图片
+    // UEU-2: 收集图片
+    //   - base64 类型直接 atob 入 zip
+    //   - file 类型（本地相对路径）浏览器无权读 file://，无法入 zip → 提示用户并跳过
+    //     原实现：HTML 会写 img src=本地路径但 zip 缺文件 → 死链
+    //     新实现：generateFlomoHTML 仅嵌入 base64 图，file 图省略 img 标签
     let imageIndex = 0;
+    let skippedFileImages = 0;
     for (const note of notes) {
       const imageUrls = ImageHelper.getImageUrls(note);
       for (const img of imageUrls) {
-        imageIndex++;
-        const noteDate = (note.created_at || dateStr).slice(0, 10);
-        const imgFileName = `img_${String(imageIndex).padStart(3, '0')}.jpg`;
-        const imgPath = `file/${noteDate}/${imgFileName}`;
-
         if (img.type === 'base64') {
+          imageIndex++;
+          const noteDate = (note.created_at || dateStr).slice(0, 10);
+          const imgFileName = `img_${String(imageIndex).padStart(3, '0')}.jpg`;
+          const imgPath = `file/${noteDate}/${imgFileName}`;
           const base64Data = img.src.replace(/^data:image\/[^;]+;base64,/, '');
           const binaryStr = atob(base64Data);
           const bytes = new Uint8Array(binaryStr.length);
@@ -65,8 +111,14 @@ const ExportModule = (() => {
             bytes[i] = binaryStr.charCodeAt(i);
           }
           files.push({ path: imgPath, content: bytes });
+        } else {
+          // UEU-2: type === 'file'，浏览器无法读本地路径，跳过避免死链
+          skippedFileImages++;
         }
       }
+    }
+    if (skippedFileImages > 0) {
+      console.warn(`[exportFlomo] 跳过 ${skippedFileImages} 张本地路径图片（浏览器无权读本地文件）`);
     }
 
     try {
@@ -109,12 +161,13 @@ const ExportModule = (() => {
       const content = highlightTagsHTML(escapeHtml(note.content || ''));
       const time = note.created_at || '';
 
+      // UEU-2 + UEU-11: 只渲染 base64 类型图片；img.src 经属性转义防 XSS
       let imagesHtml = '';
-      const imageUrls = ImageHelper.getImageUrls(note);
+      const imageUrls = ImageHelper.getImageUrls(note).filter(img => img.type === 'base64');
       if (imageUrls.length > 0) {
         imagesHtml = '<div class="images">';
         imageUrls.forEach(img => {
-          imagesHtml += `<img src="${img.src}" alt="图片">`;
+          imagesHtml += `<img src="${escapeAttr(img.src)}" alt="图片">`;
         });
         imagesHtml += '</div>';
       }
@@ -148,6 +201,16 @@ const ExportModule = (() => {
     return div.innerHTML;
   }
 
+  // UEU-11 + NF-9: 属性值转义（用于 img src / href 等 HTML 属性，防 javascript: 注入与引号 break-out）
+  function escapeAttr(text) {
+    return String(text == null ? '' : text)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   /**
    * 导入 flomo 数据
    */
@@ -170,6 +233,7 @@ const ExportModule = (() => {
 
   return {
     exportJSON,
+    importJSON,
     exportFlomo,
     importFlomo
   };

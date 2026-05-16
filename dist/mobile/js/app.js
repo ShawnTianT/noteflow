@@ -216,6 +216,17 @@ const App = {
       this.showToast('已进入本地模式');
     },
 
+    // MOB-7: 抽出 resetUserState，集中复位 Vue 状态 (与 UEU-4 思路一致)
+    resetUserState() {
+      this.notes = [];
+      this.tags = [];
+      this.noteCount = 0;
+      this.notesLoaded = false;
+      this.currentTag = '';
+      this.searchKey = '';
+      this.pinnedTags = [];
+    },
+
     async doSignOut() {
       this.closeMoreMenu();
       if (!confirm('确定退出登录？')) return;
@@ -225,6 +236,7 @@ const App = {
       this.loginUsername = '';
       this.loginPassword = '';
       this.loginError = '';
+      this.resetUserState(); // MOB-7
       this.showToast('已退出登录');
     },
 
@@ -235,6 +247,7 @@ const App = {
       this.loginUsername = '';
       this.loginPassword = '';
       this.loginError = '';
+      this.resetUserState(); // MOB-7
     },
 
     // ===== 置顶标签 =====

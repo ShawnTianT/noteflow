@@ -91,7 +91,18 @@ window.addEventListener('unhandledrejection', function(e) {
 
       <!-- 底部操作 -->
       <div class="sidebar-footer">
-        <button class="btn btn-sm btn-default" @click="importFlomo">导入</button>
+        <!-- UEU-10: 导入下拉，提供 flomo HTML / JSON 两种入口 -->
+        <div class="export-menu-wrapper" style="position:relative;flex:1;">
+          <button class="btn btn-sm btn-default" style="width:100%" @click.stop="toggleImportMenu">导入 ▾</button>
+          <div v-if="showImportMenu" class="user-dropdown show" style="left:0;right:auto;bottom:100%;top:auto;margin-bottom:4px;min-width:140px;">
+            <div class="user-option" @click="importFlomo">
+              <span>🗂 flomo HTML</span>
+            </div>
+            <div class="user-option" @click="importJSON">
+              <span>📋 JSON 文件</span>
+            </div>
+          </div>
+        </div>
         <div class="export-menu-wrapper" style="position:relative;flex:1;">
           <button class="btn btn-sm btn-default" style="width:100%" @click.stop="toggleExportMenu">导出 ▾</button>
           <div v-if="showExportMenu" class="user-dropdown show" style="left:0;right:auto;bottom:100%;top:auto;margin-bottom:4px;min-width:140px;">

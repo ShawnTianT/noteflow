@@ -8,6 +8,8 @@ const ImageHelper = (() => {
   const MAX_SIZE = 1920;       // 最长边
   const QUALITY = 0.8;         // JPEG质量
   const BASE64_THRESHOLD = 100 * 1024; // 100KB以下存base64
+  const MAX_FILE_SIZE = 20 * 1024 * 1024; // UEU-7: 单图上限 20MB，避免 OOM
+  const COMPRESS_TIMEOUT_MS = 30 * 1000;  // UEU-8: 单图处理 30s 超时
 
   /**
    * 压缩图片
@@ -15,7 +17,12 @@ const ImageHelper = (() => {
    * @returns {Promise<{base64: string, compressed: Blob, isSmall: boolean}>}
    */
   function compress(file) {
-    return new Promise((resolve, reject) => {
+    // UEU-7: 文件大小上限校验，避免 30MB+ 文件直接 OOM
+    if (file && typeof file.size === 'number' && file.size > MAX_FILE_SIZE) {
+      return Promise.reject(new Error(`图片过大（${(file.size / 1024 / 1024).toFixed(1)}MB），超过 ${MAX_FILE_SIZE / 1024 / 1024}MB 限制`));
+    }
+
+    const work = new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
@@ -40,6 +47,8 @@ const ImageHelper = (() => {
           ctx.drawImage(img, 0, 0, width, height);
 
           canvas.toBlob((blob) => {
+            // UEU-8: toBlob 在内存不足或解码异常时会返回 null，原实现立即 blob.size 抛 TypeError
+            if (!blob) return reject(new Error('canvas.toBlob 失败（浏览器拒绝编码图片）'));
             const base64 = canvas.toDataURL('image/jpeg', QUALITY);
             const isSmall = blob.size < BASE64_THRESHOLD;
             resolve({
@@ -53,12 +62,21 @@ const ImageHelper = (() => {
             });
           }, 'image/jpeg', QUALITY);
         };
-        img.onerror = reject;
+        // UEU-8: onerror 收到的是 Event，需要包成 Error
+        img.onerror = () => reject(new Error('图片解码失败（可能不是有效的图片格式）'));
         img.src = e.target.result;
       };
-      reader.onerror = reject;
+      reader.onerror = () => reject(new Error('FileReader 读取失败'));
+      reader.onabort = () => reject(new Error('FileReader 已中止'));
       reader.readAsDataURL(file);
     });
+
+    // UEU-8: 30s 超时兜底
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`图片处理超时（>${COMPRESS_TIMEOUT_MS / 1000}s）`)), COMPRESS_TIMEOUT_MS);
+    });
+
+    return Promise.race([work, timeout]);
   }
 
   /**
@@ -110,30 +128,39 @@ const ImageHelper = (() => {
    * 下载图片到本地（Safari降级方案）
    * 因为浏览器无法直接写本地文件，这里用 File System Access API
    * 如果不支持，图片只存 base64
+   * UEU-9: 缓存 dirHandle 到模块级，避免每张图都弹目录选择器
    */
+  let _cachedDirHandle = null;
   async function saveToLocal(relativePath, blob) {
-    if ('showDirectoryPicker' in window) {
-      try {
-        const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const parts = relativePath.split('/');
-        let current = dirHandle;
-        for (let i = 0; i < parts.length - 1; i++) {
-          current = await current.getDirectoryHandle(parts[i], { create: true });
-        }
-        const fileHandle = await current.getFileHandle(parts[parts.length - 1], { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return true;
-      } catch (e) {
-        if (e.name !== 'AbortError') {
-          console.warn('File System Access API 失败:', e);
-        }
-        return false;
+    if (!('showDirectoryPicker' in window)) return false;
+    try {
+      // UEU-9: 命中缓存就不再弹窗
+      if (!_cachedDirHandle) {
+        _cachedDirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
       }
+      const parts = relativePath.split('/');
+      let current = _cachedDirHandle;
+      for (let i = 0; i < parts.length - 1; i++) {
+        current = await current.getDirectoryHandle(parts[i], { create: true });
+      }
+      const fileHandle = await current.getFileHandle(parts[parts.length - 1], { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return true;
+    } catch (e) {
+      // UEU-9: AbortError = 用户取消选择目录，无需打日志；其余降级 + 清缓存让下次重试
+      if (e?.name === 'AbortError') {
+        _cachedDirHandle = null;
+      } else {
+        console.warn('File System Access API 失败:', e?.message || e);
+        // 权限失效（NotAllowedError 等）也清缓存
+        if (e?.name === 'NotAllowedError' || e?.name === 'SecurityError') {
+          _cachedDirHandle = null;
+        }
+      }
+      return false;
     }
-    // 不支持 File System Access API，图片只存base64
-    return false;
   }
 
   /**
@@ -155,13 +182,11 @@ const ImageHelper = (() => {
         const relativePath = getRelativePath(dateStr, fileName);
 
         if (result.isSmall) {
-          // 小图：base64 + 也尝试存本地
+          // UEU-1: 小图仅 base64，删除原 fire-and-forget saveToLocal
+          //   原方案 push 到 imagePaths 时，外层 await processUpload 早已返回，
+          //   imagePaths 数组事实上不会再被消费，但 saveToLocal 仍会弹目录选择器（UX 异常 + 可能 race）
           imageData.push(result.base64);
           previews.push(result.dataUrl);
-          // 尝试本地文件（可选）
-          saveToLocal(relativePath, result.compressed).then(saved => {
-            if (saved) imagePaths.push(relativePath);
-          });
         } else {
           // 大图：优先本地文件，base64作为备用
           imagePaths.push(relativePath);
