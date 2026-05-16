@@ -4,9 +4,80 @@
  *
  * 存储架构：sql.js (WASM) 运行在内存，整个 .db 二进制通过 IndexedDB 持久化
  * IndexedDB 无 5MB 限制，可容纳大量笔记
+ *
+ * ============================================================
+ * Interface Contract (与 db-supabase.js 对齐，2026-05-16)
+ * ============================================================
+ * 所有公共方法 async；字段命名 snake_case；标签字段恒为数组。
+ *
+ *   async init(): db
+ *   async addNote({ content, tags: string[],
+ *                   image_paths?: string|string[], image_data?: string|string[],
+ *                   type?, is_done?: boolean|0|1,
+ *                   created_at?, updated_at?, skipSave? }): note
+ *   async addNotesBatch(notes[], opts?): note[]
+ *   async getNotes({ pageCurrent=1, pageSize=50, tag?, search?, date? }): { data, total, hasMore }
+ *   async getNoteById(id): note | null
+ *   async updateNote(id, { content, tags, image_paths?, image_data?, is_done? }): boolean
+ *   async deleteNote(id): boolean
+ *   async getNoteCount({ tag?, search? }): number
+ *   async getTags(): { name, count }[]
+ *   async getRandomNotes(count): note[]
+ *
+ * 兼容：传入 imagePaths/imageData/isDone (camelCase) 仍接受，会一次性
+ * console.warn 提示 deprecation，并自动映射为 snake_case。
+ * ============================================================
  */
 
 const DB = (() => {
+  // 一次性 deprecation warning（每个 key 只 warn 一次/会话）
+  const _deprecationWarned = new Set();
+  function warnDeprecatedField(oldKey, newKey) {
+    if (_deprecationWarned.has(oldKey)) return;
+    _deprecationWarned.add(oldKey);
+    console.warn(`[DB] deprecated field "${oldKey}" → 请改用 "${newKey}"（与 db-supabase.js 对齐）`);
+  }
+
+  /**
+   * 接受 camelCase 兼容输入并映射到 snake_case
+   * 用于 addNote / updateNote 等公共入口
+   */
+  function compatFieldNames(opts) {
+    if (!opts || typeof opts !== 'object') return opts || {};
+    const out = { ...opts };
+    if (out.imagePaths !== undefined && out.image_paths === undefined) {
+      warnDeprecatedField('imagePaths', 'image_paths');
+      out.image_paths = out.imagePaths;
+    }
+    if (out.imageData !== undefined && out.image_data === undefined) {
+      warnDeprecatedField('imageData', 'image_data');
+      out.image_data = out.imageData;
+    }
+    if (out.isDone !== undefined && out.is_done === undefined) {
+      warnDeprecatedField('isDone', 'is_done');
+      out.is_done = out.isDone;
+    }
+    if (out.createdAt !== undefined && out.created_at === undefined) {
+      warnDeprecatedField('createdAt', 'created_at');
+      out.created_at = out.createdAt;
+    }
+    if (out.updatedAt !== undefined && out.updated_at === undefined) {
+      warnDeprecatedField('updatedAt', 'updated_at');
+      out.updated_at = out.updatedAt;
+    }
+    return out;
+  }
+
+  /**
+   * image_paths / image_data 字段值归一化为字符串（SQLite 列存逗号分隔）
+   * 接受 string | string[] | null/undefined
+   */
+  function imageFieldToString(val) {
+    if (val == null) return '';
+    if (Array.isArray(val)) return val.filter(Boolean).join(',');
+    return String(val);
+  }
+
   let db = null;
   const IDB_NAME = 'noteflow';
   const IDB_STORE = 'databases';
@@ -277,20 +348,38 @@ const DB = (() => {
 
   /**
    * 添加笔记
-   * @param {Object} options - tags 接受数组或逗号字符串
+   * SDB-4: snake_case 字段（image_paths/image_data/is_done/created_at/updated_at），
+   *        camelCase 同名字段一次性 deprecation warn 后向下兼容。
+   *        返回新建的 note 对象（与 db-supabase.js 对齐）。
    */
-  async function addNote({ content, tags = [], imagePaths = '', imageData = '', createdAt = null, updatedAt = null, type = 'note', isDone = 0, skipSave = false }) {
+  async function addNote(options) {
+    const opts = compatFieldNames(options);
+    const {
+      content,
+      tags = [],
+      image_paths = '',
+      image_data = '',
+      created_at = null,
+      updated_at = null,
+      type = 'note',
+      is_done = 0,
+      skipSave = false,
+    } = opts;
+
     const userId = getCurrentUserId();
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const ca = createdAt || now;
-    const ua = updatedAt || now;
+    const ca = created_at || now;
+    const ua = updated_at || now;
     const tagsStr = tagsToString(tags);
+    const imagePathsStr = imageFieldToString(image_paths);
+    const imageDataStr = imageFieldToString(image_data);
+    const isDoneInt = is_done ? 1 : 0;
 
     // SDB-6: 单事务包 INSERT + 标签计数更新
     const newId = withTransaction(() => {
       db.run(
         "INSERT INTO notes (user_id, content, tags, image_paths, image_data, type, is_done, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [userId, content, tagsStr, imagePaths, imageData, type, isDone, ca, ua]
+        [userId, content, tagsStr, imagePathsStr, imageDataStr, type, isDoneInt, ca, ua]
       );
 
       // 更新标签（已在事务内，updateTagCount 自带事务时是 no-op 嵌套？此处 updateTagCount 自包事务，
@@ -308,49 +397,62 @@ const DB = (() => {
       await saveDb();
     }
 
-    return newId;
+    // SDB-4: 返回新 note 对象（与 db-supabase.addNote 对齐）
+    return getNoteByIdSync(newId);
   }
 
   /**
    * 批量添加笔记（导入用，跳过逐条保存）
-   * @param {Array} notes - [{content, tags, createdAt, updatedAt}]
-   * @returns {number} 成功导入数
+   * SDB-4: 返回成功导入的 note 对象数组（与 db-supabase.addNotesBatch 对齐）。
+   *        调用方需要计数时用 result.length。
+   * @param {Array} notes - [{content, tags, image_paths?, image_data?, created_at?, updated_at?}]
+   * @param {Object} [opts] - 兼容 db-supabase.addNotesBatch 第二参（这里实际无视）
+   * @returns {Promise<Array>} 成功导入的 note 对象数组
    */
-  async function addNotesBatch(notes) {
-    let imported = 0;
+  async function addNotesBatch(notes, opts = {}) { // eslint-disable-line no-unused-vars
+    const inserted = [];
     for (const note of notes) {
       if (!note.content || note.content.length < 1) continue;
       try {
-        await addNote({
-          content: note.content,
-          tags: note.tags || [],  // 接受数组格式
-          imagePaths: note.imagePaths || '',
-          imageData: note.imageData || '',
-          createdAt: note.createdAt || note.created_at || null,
-          updatedAt: note.updatedAt || note.updated_at || null,
-          skipSave: true
+        const compat = compatFieldNames(note);
+        const created = await addNote({
+          content: compat.content,
+          tags: compat.tags || [],
+          image_paths: compat.image_paths || '',
+          image_data: compat.image_data || '',
+          created_at: compat.created_at || null,
+          updated_at: compat.updated_at || null,
+          skipSave: true,
         });
-        imported++;
+        if (created) inserted.push(created);
       } catch (e) {
         console.error('批量导入单条失败:', e);
       }
     }
     // 批量结束后统一保存
-    if (imported > 0) {
+    if (inserted.length > 0) {
       markDirty();
       await saveDb();
     }
-    return imported;
+    return inserted;
   }
 
   /**
    * 获取笔记列表
+   * SDB-4: async + pageCurrent 默认 1（与 db-supabase.getNotes 对齐）
    * 返回 { data, total, hasMore }
    */
-  function getNotes(options = {}) {
-    // 兼容 pageCurrent（从1开始）和 page（从0开始）
-    const pageCurrent = options.pageCurrent || 0;
-    const page = options.page != null ? options.page : (pageCurrent > 0 ? pageCurrent - 1 : 0);
+  async function getNotes(options = {}) {
+    return getNotesSync(options);
+  }
+
+  /**
+   * 同步实现（内部用，比如 exportAsJSON / getAllNotes）
+   * 兼容 pageCurrent（从1开始）和 page（从0开始，旧字段）
+   */
+  function getNotesSync(options = {}) {
+    const pageCurrent = options.pageCurrent != null ? options.pageCurrent : 1;
+    const page = options.page != null ? options.page : Math.max(0, pageCurrent - 1);
     const { pageSize = 50, tag = '', search = '', date = '' } = options;
     const userId = getCurrentUserId();
 
@@ -409,8 +511,9 @@ const DB = (() => {
 
   /**
    * 获取笔记总数
+   * SDB-4: async（与 db-supabase 对齐）
    */
-  function getNoteCount(options = {}) {
+  async function getNoteCount(options = {}) {
     const { tag = '', search = '' } = options;
     const userId = getCurrentUserId();
 
@@ -467,22 +570,36 @@ const DB = (() => {
   /**
    * 更新笔记（tags 接受数组或逗号字符串）
    * SDB-5/SDB-6: async + 单事务 + 错误传播
+   * SDB-4: snake_case 字段（image_paths/image_data/is_done），camelCase 兼容；
+   *        返回 boolean（与 db-supabase.updateNote 对齐：note 不存在返回 false）
    */
-  async function updateNote(id, { content, tags = [], imagePaths = '', imageData = '' }) {
+  async function updateNote(id, updates) {
+    const opts = compatFieldNames(updates || {});
+    const {
+      content,
+      tags = [],
+      image_paths = '',
+      image_data = '',
+    } = opts;
+
     const tagsArr = normalizeTags(tags);
     const tagsStr = tagsToString(tags);
+    const imagePathsStr = imageFieldToString(image_paths);
+    const imageDataStr = imageFieldToString(image_data);
 
+    let noteFound = false;
     withTransaction(() => {
       const oldNote = getNoteByIdSync(id);
-      if (oldNote) {
-        normalizeTags(oldNote.tags).forEach(tag => {
-          updateTagCountInline(tag, -1);
-        });
-      }
+      if (!oldNote) return;
+      noteFound = true;
+
+      normalizeTags(oldNote.tags).forEach(tag => {
+        updateTagCountInline(tag, -1);
+      });
 
       db.run(
         "UPDATE notes SET content = ?, tags = ?, image_paths = ?, image_data = ?, updated_at = datetime('now','localtime') WHERE id = ?",
-        [content, tagsStr, imagePaths, imageData, id]
+        [content, tagsStr, imagePathsStr, imageDataStr, id]
       );
 
       tagsArr.forEach(tag => {
@@ -490,28 +607,37 @@ const DB = (() => {
       });
     });
 
-    markDirty();
-    await saveDb();
+    if (noteFound) {
+      markDirty();
+      await saveDb();
+    }
+    return noteFound;
   }
 
   /**
    * 删除笔记
    * SDB-5/SDB-6: async + 单事务 + 错误传播
+   * SDB-4: 返回 boolean（与 db-supabase.deleteNote 对齐：note 不存在返回 false）
    */
   async function deleteNote(id) {
+    let noteFound = false;
     withTransaction(() => {
       const note = getNoteByIdSync(id);
-      if (note) {
-        normalizeTags(note.tags).forEach(tag => {
-          updateTagCountInline(tag, -1);
-        });
-      }
+      if (!note) return;
+      noteFound = true;
+
+      normalizeTags(note.tags).forEach(tag => {
+        updateTagCountInline(tag, -1);
+      });
 
       db.run("DELETE FROM notes WHERE id = ?", [id]);
     });
 
-    markDirty();
-    await saveDb();
+    if (noteFound) {
+      markDirty();
+      await saveDb();
+    }
+    return noteFound;
   }
 
   // ==================== 标签操作 ====================
@@ -557,8 +683,9 @@ const DB = (() => {
 
   /**
    * 获取标签列表
+   * SDB-4: async（与 db-supabase.getTags 对齐）
    */
-  function getTags() {
+  async function getTags() {
     const userId = getCurrentUserId();
     const stmt = db.prepare("SELECT name, count FROM tags WHERE user_id = ? ORDER BY count DESC, name ASC");
     stmt.bind([userId]);
@@ -573,8 +700,9 @@ const DB = (() => {
 
   /**
    * 随机获取 N 条笔记（每日回顾用）
+   * SDB-4: async（与 db-supabase.getRandomNotes 对齐）
    */
-  function getRandomNotes(count) {
+  async function getRandomNotes(count) {
     const userId = getCurrentUserId();
     const stmt = db.prepare("SELECT * FROM notes WHERE user_id = ? ORDER BY RANDOM() LIMIT ?");
     stmt.bind([userId, count]);
@@ -675,10 +803,12 @@ const DB = (() => {
     return db.export();
   }
 
-  function exportAsJSON() {
+  // SDB-4: getNotes/getTags 已改 async，导出函数顺势 async（向后兼容：原本无外部 await 也能正常工作，因为 sql.js 同步）
+  async function exportAsJSON() {
     const userId = getCurrentUserId();
-    const result = getNotes({ page: 0, pageSize: 999999 });
-    const tags = getTags();
+    // 内部用 sync 实现，保留原始行为
+    const result = getNotesSync({ page: 0, pageSize: 999999 });
+    const tags = await getTags();
 
     return JSON.stringify({
       version: '1.0',
@@ -689,8 +819,8 @@ const DB = (() => {
     }, null, 2);
   }
 
-  function getAllNotes() {
-    return getNotes({ page: 0, pageSize: 999999 });
+  async function getAllNotes() {
+    return getNotesSync({ page: 0, pageSize: 999999 });
   }
 
   // ==================== 公开接口 ====================
