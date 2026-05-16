@@ -15,10 +15,11 @@ const TagsModule = (() => {
   const PINNED_KEY_PREFIX = 'noteflow_pinned_tags_';
 
   /**
-   * 获取当前用户的置顶标签列表
+   * 获取当前用户的置顶标签列表（NF-7: 无登录态时返回空，避免污染共享 key）
    */
   function getPinnedTags() {
     const userId = DB.getCurrentUserId();
+    if (!userId) return [];
     try {
       const data = localStorage.getItem(PINNED_KEY_PREFIX + userId);
       return data ? JSON.parse(data) : [];
@@ -28,11 +29,16 @@ const TagsModule = (() => {
   }
 
   /**
-   * 保存置顶标签列表
+   * 保存置顶标签列表（NF-7: 无登录态时不写，写失败不抛）
    */
   function savePinnedTags(pinnedList) {
     const userId = DB.getCurrentUserId();
-    localStorage.setItem(PINNED_KEY_PREFIX + userId, JSON.stringify(pinnedList));
+    if (!userId) return;
+    try {
+      localStorage.setItem(PINNED_KEY_PREFIX + userId, JSON.stringify(pinnedList));
+    } catch (e) {
+      console.warn('[TagsModule] savePinnedTags failed:', e?.message || e);
+    }
   }
 
   /**
@@ -107,13 +113,18 @@ const TagsModule = (() => {
   }
 
   /**
-   * 构建标签树（P3：按 tags 数组身份缓存，避免重复构建）
-   * 同一个 tags 引用 + 同样的 length 命中缓存。app.refreshTags 会重新赋值 this.tags，
-   * 引用变化时缓存自动失效；中间手动改 push/splice 同一数组时也会失效（length 变化）。
+   * 构建标签树（P3 + NF-6: 引用 + 内容签名双重缓存）
+   * 原方案只比 tagsRef + length，同引用下原地改 tag.count（add 已有 tag）不会失效。
+   * NF-6: 加入 name:count join 内容签名比对，count 变化即失效。
    */
-  let _treeCache = { tagsRef: null, tagsLen: -1, tree: null };
+  let _treeCache = { tagsRef: null, sig: null, tree: null };
   function buildTagTree(tags) {
-    if (_treeCache.tagsRef === tags && _treeCache.tagsLen === tags.length && _treeCache.tree) {
+    // 轻量签名：name:count 拼接，长度变化与 count 变化都会破坏签名
+    let sig = '';
+    for (let i = 0; i < tags.length; i++) {
+      sig += tags[i].name + ':' + tags[i].count + '|';
+    }
+    if (_treeCache.tagsRef === tags && _treeCache.sig === sig && _treeCache.tree) {
       return _treeCache.tree;
     }
     const rootMap = new Map();
@@ -144,7 +155,7 @@ const TagsModule = (() => {
       node.children.sort((a, b) => b.count - a.count);
     });
 
-    _treeCache = { tagsRef: tags, tagsLen: tags.length, tree: result };
+    _treeCache = { tagsRef: tags, sig: sig, tree: result };
     return result;
   }
 

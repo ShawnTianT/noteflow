@@ -8,6 +8,7 @@ const Editor = (() => {
   let pendingImages = []; // 待发送的图片预览
   let vmRef = null;       // Vue 实例引用（document listener 闭包用）
   let globalListenersAttached = false; // document 级 listener 仅绑一次
+  let isSending = false;  // 发布并发守门 (NF-3)
 
   /**
    * 初始化编辑器（幂等）
@@ -38,6 +39,8 @@ const Editor = (() => {
           updateTagPreview(textarea.value);
           return;
         }
+        // NF-1: 中文输入法候选词期间 Enter 不应触发发布
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
           sendNote(vmRef);
@@ -88,6 +91,12 @@ const Editor = (() => {
     if (!globalListenersAttached) {
       // 绑定粘贴上传
       document.addEventListener('paste', (e) => {
+        // NF-5: 只在发布弹窗激活 或 焦点在 note-input 时处理粘贴，避免误拦其他输入框
+        const publishModal = document.getElementById('publish-modal');
+        const inPublish = publishModal?.classList.contains('active');
+        const onInput = document.activeElement?.id === 'note-input';
+        if (!inPublish && !onInput) return;
+
         const items = [...(e.clipboardData?.items || [])];
         const imageItems = items.filter(item => item.type.startsWith('image/'));
         if (imageItems.length) {
@@ -119,48 +128,56 @@ const Editor = (() => {
    * 发送笔记
    */
   async function sendNote(vm) {
+    // NF-3: 并发守门，防止 Enter 连击 / fab 双击导致重复发布
+    if (isSending) return;
+
     const textarea = document.getElementById('note-input');
     const content = textarea.value.trim();
     if (!content && pendingImages.length === 0) return;
 
-    // 提取标签
-    const tags = extractTags(content);
-
-    // 处理图片
-    let imagePaths = [];
-    let imageData = [];
-    if (pendingImages.length > 0) {
-      const imgResult = await ImageHelper.processUpload(pendingImages.map(p => p.file));
-      imagePaths = imgResult.imagePaths || [];
-      imageData = imgResult.imageData || [];
-    }
-
-    // 写入数据库（Supabase 版：tags 传数组）
+    isSending = true;
     try {
-      await DB.addNote({
-        content,
-        tags: tags, // 数组格式
-        image_paths: imagePaths,
-        image_data: imageData
-      });
+      // 提取标签
+      const tags = extractTags(content);
 
-      // 清空输入
-      textarea.value = '';
-      pendingImages = [];
-      updateImagePreview();
-      updateTagPreview('');
+      // 处理图片
+      let imagePaths = [];
+      let imageData = [];
+      if (pendingImages.length > 0) {
+        const imgResult = await ImageHelper.processUpload(pendingImages.map(p => p.file));
+        imagePaths = imgResult.imagePaths || [];
+        imageData = imgResult.imageData || [];
+      }
 
-      // 关闭发布弹窗
-      closePublishModal();
+      // 写入数据库（Supabase 版：tags 传数组）
+      try {
+        await DB.addNote({
+          content,
+          tags: tags, // 数组格式
+          image_paths: imagePaths,
+          image_data: imageData
+        });
 
-      // 刷新时间线
-      if (vm && vm.refreshNotes) vm.refreshNotes();
-      if (vm && vm.refreshTags) vm.refreshTags();
+        // 清空输入
+        textarea.value = '';
+        pendingImages = [];
+        updateImagePreview();
+        updateTagPreview('');
 
-      showToast('笔记已保存');
-    } catch (e) {
-      console.error('保存笔记失败:', e);
-      showToast('保存失败，请重试', 'error');
+        // 关闭发布弹窗
+        closePublishModal();
+
+        // 刷新时间线
+        if (vm && vm.refreshNotes) vm.refreshNotes();
+        if (vm && vm.refreshTags) vm.refreshTags();
+
+        showToast('笔记已保存');
+      } catch (e) {
+        console.error('保存笔记失败:', e);
+        showToast('保存失败，请重试', 'error');
+      }
+    } finally {
+      isSending = false;
     }
   }
 

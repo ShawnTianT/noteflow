@@ -42,9 +42,9 @@ function loadBuildTagTree(filePath) {
   }
   if (end === -1) throw new Error('Unbalanced braces');
   const fnSrc = src.slice(start, end);
-  // 包装：在外层声明 _treeCache，让函数闭包能引用到。
+  // 包装：在外层声明 _treeCache，让函数闭包能引用到（NF-6 后用 sig 字段）。
   return new Function(`
-    let _treeCache = { tagsRef: null, tagsLen: -1, tree: null };
+    let _treeCache = { tagsRef: null, sig: null, tree: null };
     ${fnSrc}
     return buildTagTree;
   `)();
@@ -245,6 +245,28 @@ const T = (...specs) => specs.map(s => {
   check('P3 缓存: 同引用但 length 变化 → 缓存失效',
     t1 !== t2 && t2.length === 2,
     `t1===t2: ${t1 === t2}, t2.length=${t2.length}`);
+}
+
+// === 11b. NF-6 回归: 同引用 + 同 length，但原地改 count → 缓存必须失效 ===
+// 原实现只比 tagsRef + length，count 变化不会触发重建（add 已存在 tag 时 root.count 与 children.count 与实际不一致）。
+// 修复后用 name:count 内容签名比对。
+{
+  const tags = [
+    { name: 'p/x', count: 1 },
+    { name: 'p/y', count: 1 },
+  ];
+  const t1 = buildTagTree(tags);
+  tags[0].count = 9; // 同引用、同 length，但内容变了
+  const t2 = buildTagTree(tags);
+  check('NF-6: 同引用同长度但 count 变化 → 缓存失效（返回新对象）',
+    t1 !== t2,
+    `t1===t2: ${t1 === t2}（应不等）`);
+  // 新树的 root.count 应反映新 count（1 + 9 = 10）
+  if (t2.length === 1) {
+    check('NF-6: 重建后 root.count 反映新 count (1+9=10)',
+      t2[0].count === 10,
+      `got count=${t2[0].count}`);
+  }
 }
 
 // === 12. 边界：tag 名以 / 开头（slashIdx === 0 走 else 分支） ===

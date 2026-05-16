@@ -208,47 +208,58 @@ const Timeline = (() => {
     return div.innerHTML;
   }
 
+  // NF-2: 本地日期 key (YYYY-MM-DD)，用于分组与 today/yesterday 比对
+  function localDateKey(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
   /**
-   * 按日期分组
+   * 按日期分组（NF-2: 走本地时区，避免东八区凌晨笔记被并到前一天）
    */
   function groupByDate(notes) {
     const groups = {};
     notes.forEach(note => {
-      const date = (note.created_at || '').slice(0, 10) || '未知日期';
-      if (!groups[date]) groups[date] = [];
-      groups[date].push(note);
+      let key = '未知日期';
+      if (note.created_at) {
+        const d = new Date(note.created_at);
+        if (!isNaN(d.getTime())) key = localDateKey(d);
+      }
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(note);
     });
     return groups;
   }
 
   /**
-   * 格式化日期标签
+   * 格式化日期标签（NF-2: today/yesterday 用本地日期对比）
    */
   function formatDateLabel(dateStr) {
     if (!dateStr || dateStr === '未知日期') return dateStr;
 
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const todayKey = localDateKey(new Date());
+    const yesterdayKey = localDateKey(new Date(Date.now() - 86400000));
 
-    if (dateStr === today) return '今天';
-    if (dateStr === yesterday) return '昨天';
+    if (dateStr === todayKey) return '今天';
+    if (dateStr === yesterdayKey) return '昨天';
 
-    const date = new Date(dateStr);
+    // dateStr 形如 "2026-05-16"，按本地构造以免被解析为 UTC
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const date = new Date(y, (m || 1) - 1, d || 1);
     const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-    const weekDay = weekDays[date.getDay()];
-
-    return `${month}月${day}日 ${weekDay}`;
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${weekDays[date.getDay()]}`;
   }
 
   /**
-   * 格式化时间
+   * 格式化时间（NF-2: 本地 HH:mm，原实现取 ISO 字符串第 11-16 位是 UTC）
    */
   function formatTime(timeStr) {
     if (!timeStr) return '';
-    const match = timeStr.match(/(\d{2}):(\d{2})/);
-    return match ? `${match[1]}:${match[2]}` : timeStr.slice(11, 16);
+    const d = new Date(timeStr);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
   }
 
   /**

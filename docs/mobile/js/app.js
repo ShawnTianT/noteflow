@@ -239,7 +239,9 @@ const App = {
 
     // ===== 置顶标签 =====
     loadPinnedTags() {
+      // MOB-5: 无登录态时不读，避免和未登录公共 key 串数据
       const userId = DB.getCurrentUserId();
+      if (!userId) { this.pinnedTags = []; return; }
       try {
         const data = localStorage.getItem(PINNED_KEY_PREFIX + userId);
         this.pinnedTags = data ? JSON.parse(data) : [];
@@ -247,8 +249,14 @@ const App = {
     },
 
     savePinnedTags() {
+      // MOB-5: 无登录态时不写；写失败 (quota / 私密浏览) 不抛
       const userId = DB.getCurrentUserId();
-      localStorage.setItem(PINNED_KEY_PREFIX + userId, JSON.stringify(this.pinnedTags));
+      if (!userId) return;
+      try {
+        localStorage.setItem(PINNED_KEY_PREFIX + userId, JSON.stringify(this.pinnedTags));
+      } catch (e) {
+        console.warn('[mobile] savePinnedTags failed:', e?.message || e);
+      }
     },
 
     // ===== 同步 =====
